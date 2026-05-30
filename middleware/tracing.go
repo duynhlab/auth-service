@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/duynhne/auth-service/config"
@@ -20,6 +21,9 @@ import (
 )
 
 var (
+	// tracerMu guards the lazily-initialised tracer so concurrent requests that
+	// call GetTracer before InitTracing has run do not race on the global.
+	tracerMu        sync.RWMutex
 	tracer          trace.Tracer
 	tracerProvider  *sdktrace.TracerProvider
 	detectedService string
@@ -101,7 +105,9 @@ func InitTracing(cfg *config.Config) (*sdktrace.TracerProvider, error) {
 	))
 
 	// Create tracer for this service using auto-detected name
+	tracerMu.Lock()
 	tracer = otel.Tracer(detectedService)
+	tracerMu.Unlock()
 
 	return tracerProvider, nil
 }
@@ -154,6 +160,17 @@ func TracingMiddleware() gin.HandlerFunc {
 
 // GetTracer returns the tracer instance with auto-detected service name
 func GetTracer() trace.Tracer {
+	tracerMu.RLock()
+	t := tracer
+	tracerMu.RUnlock()
+	if t != nil {
+		return t
+	}
+
+	// Lazy fallback (e.g. tracing disabled or InitTracing failed): initialise
+	// once under the write lock using double-checked locking.
+	tracerMu.Lock()
+	defer tracerMu.Unlock()
 	if tracer == nil {
 		serviceName := detectedService
 		if serviceName == "" {

@@ -71,8 +71,11 @@ func main() {
 		log.Info().Msg("Profiling disabled (PROFILING_ENABLED=false)")
 	}
 
-	// Initialize database connection pool (pgx)
-	pool, err := database.Connect(context.Background())
+	// Initialize database connection pool (pgx) with a bounded startup timeout
+	// so an unreachable database fails fast instead of hanging the process.
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+	pool, err := database.Connect(dbCtx)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to connect to database")
 		return
