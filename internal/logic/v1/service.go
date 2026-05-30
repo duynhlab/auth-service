@@ -2,6 +2,8 @@ package v1
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"time"
@@ -12,6 +14,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// dummyHash is a precomputed bcrypt hash used to equalize response timing on
+// the user-not-found path so authentication does not leak whether a username
+// exists (CompareHashAndPassword runs in both branches).
+const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
+// newSessionToken returns a cryptographically-random opaque session token.
+// It reads 32 bytes from crypto/rand and base64.RawURLEncoding-encodes them.
+func newSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
 
 // AuthService implements authentication business rules.
 // It depends on repository interfaces (injected via constructor) and
@@ -44,6 +61,9 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 		return nil, fmt.Errorf("query user %q: %w", req.Username, err)
 	}
 	if row == nil {
+		// Run bcrypt against a dummy hash to equalize response timing with the
+		// password-mismatch path, preventing username enumeration via timing.
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password))
 		span.SetAttributes(attribute.Bool("auth.success", false))
 		span.AddEvent("authentication.failed")
 		return nil, fmt.Errorf("authenticate user %q: %w", req.Username, ErrUserNotFound)
@@ -62,8 +82,12 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 		span.RecordError(fmt.Errorf("update last_login: %w", updateErr))
 	}
 
-	// Create session token (simplified stub - in production use JWT)
-	token := fmt.Sprintf("jwt-token-v1-%d-%d", row.ID, time.Now().Unix())
+	// Create an opaque, cryptographically-random session token
+	token, err := newSessionToken()
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
 
 	// Persist session (best-effort, don't fail login)
 	expiresAt := time.Now().Add(24 * time.Hour)
@@ -125,8 +149,12 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
 
-	// Create session token (simplified stub)
-	token := fmt.Sprintf("jwt-token-v1-%d-%d", userID, time.Now().Unix())
+	// Create an opaque, cryptographically-random session token
+	token, err := newSessionToken()
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
 
 	// Persist session (best-effort)
 	expiresAt := time.Now().Add(24 * time.Hour)
