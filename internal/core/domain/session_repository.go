@@ -24,4 +24,8 @@ type SessionRepository interface {
 	// user data together with the session expiry time.
 	// Returns (nil, nil) when the token does not match any session.
 	GetUserByToken(ctx context.Context, token string) (*SessionRow, error)
+
+	// Delete revokes a session by token. It is idempotent: deleting a token that
+	// does not exist is not an error.
+	Delete(ctx context.Context, token string) error
 }

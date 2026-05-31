@@ -30,6 +30,38 @@ func (h *Handler) RegisterRoutes(r gin.IRouter) {
 	r.POST("/auth/v1/public/login", h.Login)
 	r.POST("/auth/v1/public/register", h.Register)
 	r.GET("/auth/v1/private/me", h.GetMe)
+	r.POST("/auth/v1/private/logout", h.Logout)
+}
+
+// Logout revokes the caller's session token. Idempotent — returns 200 on a
+// well-formed request so clients can safely clear local state.
+func (h *Handler) Logout(c *gin.Context) {
+	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
+		attribute.String("layer", "web"),
+		attribute.String("method", c.Request.Method),
+		attribute.String("path", c.Request.URL.Path),
+	))
+	defer span.End()
+
+	logger := pkgzerolog.FromContext(ctx)
+
+	authHeader := c.GetHeader("Authorization")
+	const bearerPrefix = "Bearer "
+	if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization format"})
+		return
+	}
+	token := authHeader[len(bearerPrefix):]
+
+	if err := h.auth.Logout(ctx, token); err != nil {
+		span.RecordError(err)
+		logger.Error().Err(err).Msg("Logout failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	logger.Info().Msg("Session revoked")
+	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
 // Login handles HTTP request for user login.

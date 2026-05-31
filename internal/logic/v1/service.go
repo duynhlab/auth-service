@@ -228,3 +228,19 @@ func (s *AuthService) GetUserByToken(ctx context.Context, token string) (*domain
 
 	return user, nil
 }
+
+// Logout revokes the session for the given opaque token. Idempotent: revoking a
+// token that no longer exists is not an error.
+func (s *AuthService) Logout(ctx context.Context, token string) error {
+	ctx, span := middleware.StartSpan(ctx, "auth.logout", trace.WithAttributes(
+		attribute.String("layer", "logic"),
+	))
+	defer span.End()
+
+	if err := s.sessions.Delete(ctx, token); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	span.AddEvent("session.revoked")
+	return nil
+}
