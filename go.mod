@@ -1,9 +1,9 @@
-module github.com/duynhne/auth-service
+module github.com/duynhlab/auth-service
 
 go 1.26.2
 
 require (
-	github.com/duynhne/pkg v0.1.2
+	github.com/duynhlab/pkg v0.2.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/grafana/pyroscope-go v1.3.1
 	github.com/jackc/pgx/v5 v5.9.2
@@ -76,4 +76,4 @@ require (
 )
 
 // For local development with pkg
-// replace github.com/duynhne/pkg => ../pkg
+// replace github.com/duynhlab/pkg => ../pkg

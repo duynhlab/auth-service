@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
-	pkgzerolog "github.com/duynhne/pkg/logger/zerolog"
+	pkgzerolog "github.com/duynhlab/pkg/logger/zerolog"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/duynhne/auth-service/internal/core/domain"
-	"github.com/duynhne/auth-service/middleware"
+	"github.com/duynhlab/auth-service/internal/core/domain"
+	"github.com/duynhlab/auth-service/middleware"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"

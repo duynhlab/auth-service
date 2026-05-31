@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/duynhne/auth-service/config"
+	"github.com/duynhlab/auth-service/config"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"

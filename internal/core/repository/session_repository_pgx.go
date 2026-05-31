@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/duynhne/auth-service/internal/core/domain"
+	"github.com/duynhlab/auth-service/internal/core/domain"
 )
 
 // PgxSessionRepository implements domain.SessionRepository using pgxpool.
