@@ -21,6 +21,12 @@ func NewSessionRepository(pool *pgxpool.Pool) *PgxSessionRepository {
 	return &PgxSessionRepository{pool: pool}
 }
 
+// Delete revokes a session by token. Idempotent — no error if the token is absent.
+func (r *PgxSessionRepository) Delete(ctx context.Context, token string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token)
+	return err
+}
+
 // Create inserts a new session for the given user.
 func (r *PgxSessionRepository) Create(ctx context.Context, userID int, token string, expiresAt time.Time) error {
 	query := `INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3)`
