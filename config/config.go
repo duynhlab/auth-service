@@ -42,11 +42,20 @@ type Config struct {
 	Logging         LoggingConfig   // Structured logging (Zap)
 	Metrics         MetricsConfig   // Prometheus metrics
 	Database        DatabaseConfig  // PostgreSQL database configuration
+	GRPC            GRPCConfig      // Internal gRPC server (east-west /me validation)
 	ShutdownTimeout int             // Graceful shutdown timeout in seconds - from SHUTDOWN_TIMEOUT env (default: 10)
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
 	ReadinessDrainDelay int
+}
+
+// GRPCConfig defines the internal gRPC server. HTTP :8080 is unaffected; the
+// gRPC listener is additive and serves AuthService.GetMe for east-west token
+// validation (every service validates here on each authenticated request).
+type GRPCConfig struct {
+	Enabled bool   // Enable the gRPC server - from GRPC_ENABLED env (default: false)
+	Port    string // gRPC listen port - from GRPC_PORT env (default: "9090")
 }
 
 // ServiceConfig defines basic service configuration
@@ -89,10 +98,10 @@ type MetricsConfig struct {
 // DatabaseConfig defines PostgreSQL database configuration
 // All database connections use separate environment variables (not DATABASE_URL string)
 type DatabaseConfig struct {
-	Host           string // Database host - from DB_HOST env
-	Port           string // Database port - from DB_PORT env (default: "5432")
-	Name           string // Database name - from DB_NAME env
-	User           string // Database user - from DB_USER env
+	Host string // Database host - from DB_HOST env
+	Port string // Database port - from DB_PORT env (default: "5432")
+	Name string // Database name - from DB_NAME env
+	User string // Database user - from DB_USER env
 	// nolint:gosec // G117: This is a configuration field for the database password
 	Password       string // Database password - from DB_PASSWORD env
 	SSLMode        string // SSL mode - from DB_SSLMODE env (default: "disable")
@@ -146,6 +155,10 @@ func Load() *Config {
 			Enabled: getEnvBool("METRICS_ENABLED", true),
 			Path:    getEnv("METRICS_PATH", "/metrics"),
 		},
+		GRPC: GRPCConfig{
+			Enabled: getEnvBool("GRPC_ENABLED", false),
+			Port:    getEnv("GRPC_PORT", "9090"),
+		},
 		Database: DatabaseConfig{
 			Host:           getEnv("DB_HOST", ""),
 			Port:           getEnv("DB_PORT", "5432"),
@@ -157,7 +170,7 @@ func Load() *Config {
 			PoolMode:       getEnv("DB_POOL_MODE", ""),
 			PoolerType:     getEnv("DB_POOLER_TYPE", ""),
 		},
-		ShutdownTimeout: getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
+		ShutdownTimeout:     getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
 		ReadinessDrainDelay: getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os/signal"
 	"sync/atomic"
@@ -13,14 +14,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
 
 	"github.com/duynhne/auth-service/config"
 	database "github.com/duynhne/auth-service/internal/core"
 	"github.com/duynhne/auth-service/internal/core/repository"
+	grpcv1 "github.com/duynhne/auth-service/internal/grpc/v1"
 	logicv1 "github.com/duynhne/auth-service/internal/logic/v1"
 	webv1 "github.com/duynhne/auth-service/internal/web/v1"
 	"github.com/duynhne/auth-service/middleware"
+	"github.com/duynhne/pkg/grpcx"
 	"github.com/duynhne/pkg/logger/zerolog"
+	authv1 "github.com/duynhne/pkg/proto/auth/v1"
 )
 
 func main() {
@@ -86,10 +91,43 @@ func main() {
 	authSvc := logicv1.NewAuthService(userRepo, sessionRepo)
 	handler := webv1.NewHandler(authSvc)
 
+	// Optional internal gRPC server (AuthService.GetMe). HTTP :8080 is unaffected.
+	grpcSrv := startGRPC(cfg, authSvc)
+
 	// Setup router and server, then run with graceful shutdown
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, handler, &isShuttingDown)
-	runGracefulShutdown(cfg, srv, pool, tp, &isShuttingDown)
+	runGracefulShutdown(cfg, srv, grpcSrv, pool, tp, &isShuttingDown)
+}
+
+// startGRPC starts the internal gRPC server on cfg.GRPC.Port when enabled,
+// serving AuthService.GetMe alongside the HTTP listener (dual-port). Returns nil
+// when disabled. Uses the shared grpcx bootstrap (OpenTelemetry, health,
+// reflection).
+func startGRPC(cfg *config.Config, authSvc *logicv1.AuthService) *grpc.Server {
+	if !cfg.GRPC.Enabled {
+		log.Info().Msg("gRPC server disabled (GRPC_ENABLED=false)")
+		return nil
+	}
+
+	lc := net.ListenConfig{}
+	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
+	if err != nil {
+		log.Error().Err(err).Str("port", cfg.GRPC.Port).Msg("Failed to listen for gRPC")
+		return nil
+	}
+
+	grpcSrv, _ := grpcx.NewServer()
+	authv1.RegisterAuthServiceServer(grpcSrv, grpcv1.NewServer(authSvc))
+
+	go func() {
+		log.Info().Str("port", cfg.GRPC.Port).Msg("Starting gRPC server")
+		if err := grpcSrv.Serve(lis); err != nil {
+			log.Error().Err(err).Msg("gRPC server error")
+		}
+	}()
+
+	return grpcSrv
 }
 
 // setupServer creates and configures the HTTP server with all routes and middleware.
@@ -139,6 +177,7 @@ func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *ato
 func runGracefulShutdown(
 	cfg *config.Config,
 	srv *http.Server,
+	grpcSrv *grpc.Server,
 	pool *pgxpool.Pool,
 	tp interface{ Shutdown(context.Context) error },
 	isShuttingDown *atomic.Bool,
@@ -182,6 +221,12 @@ func runGracefulShutdown(
 		log.Error().Err(err).Msg("HTTP server shutdown error")
 	} else {
 		log.Info().Msg("HTTP server shutdown complete")
+	}
+
+	// 1b. Shutdown gRPC server (if enabled)
+	if grpcSrv != nil {
+		grpcSrv.GracefulStop()
+		log.Info().Msg("gRPC server shutdown complete")
 	}
 
 	// 2. Close database connection pool
