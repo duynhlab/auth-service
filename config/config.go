@@ -53,9 +53,10 @@ type Config struct {
 // GRPCConfig defines the internal gRPC server. HTTP :8080 is unaffected; the
 // gRPC listener is additive and serves AuthService.GetMe for east-west token
 // validation (every service validates here on each authenticated request).
+// gRPC is the official east-west transport — the server always runs; only the
+// port is configurable.
 type GRPCConfig struct {
-	Enabled bool   // Enable the gRPC server - from GRPC_ENABLED env (default: false)
-	Port    string // gRPC listen port - from GRPC_PORT env (default: "9090")
+	Port string // gRPC listen port - from GRPC_PORT env (default: "9090")
 }
 
 // ServiceConfig defines basic service configuration
@@ -156,8 +157,7 @@ func Load() *Config {
 			Path:    getEnv("METRICS_PATH", "/metrics"),
 		},
 		GRPC: GRPCConfig{
-			Enabled: getEnvBool("GRPC_ENABLED", false),
-			Port:    getEnv("GRPC_PORT", "9090"),
+			Port: getEnv("GRPC_PORT", "9090"),
 		},
 		Database: DatabaseConfig{
 			Host:           getEnv("DB_HOST", ""),
