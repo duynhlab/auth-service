@@ -16,16 +16,16 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 
-	"github.com/duynhne/auth-service/config"
-	database "github.com/duynhne/auth-service/internal/core"
-	"github.com/duynhne/auth-service/internal/core/repository"
-	grpcv1 "github.com/duynhne/auth-service/internal/grpc/v1"
-	logicv1 "github.com/duynhne/auth-service/internal/logic/v1"
-	webv1 "github.com/duynhne/auth-service/internal/web/v1"
-	"github.com/duynhne/auth-service/middleware"
-	"github.com/duynhne/pkg/grpcx"
-	"github.com/duynhne/pkg/logger/zerolog"
-	authv1 "github.com/duynhne/pkg/proto/auth/v1"
+	"github.com/duynhlab/auth-service/config"
+	database "github.com/duynhlab/auth-service/internal/core"
+	"github.com/duynhlab/auth-service/internal/core/repository"
+	grpcv1 "github.com/duynhlab/auth-service/internal/grpc/v1"
+	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
+	webv1 "github.com/duynhlab/auth-service/internal/web/v1"
+	"github.com/duynhlab/auth-service/middleware"
+	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/zerolog"
+	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
 func main() {

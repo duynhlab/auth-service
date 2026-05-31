@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/duynhne/auth-service/internal/core/domain"
-	logicv1 "github.com/duynhne/auth-service/internal/logic/v1"
-	authv1 "github.com/duynhne/pkg/proto/auth/v1"
+	"github.com/duynhlab/auth-service/internal/core/domain"
+	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
+	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"

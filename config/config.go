@@ -9,7 +9,7 @@
 //
 // Usage:
 //
-//	import "github.com/duynhne/auth-service/config"
+//	import "github.com/duynhlab/auth-service/config"
 //
 //	func main() {
 //	    cfg := config.Load()

@@ -7,10 +7,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/duynhne/auth-service/internal/core/domain"
-	logicv1 "github.com/duynhne/auth-service/internal/logic/v1"
-	"github.com/duynhne/pkg/grpcx"
-	authv1 "github.com/duynhne/pkg/proto/auth/v1"
+	"github.com/duynhlab/auth-service/internal/core/domain"
+	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
+	"github.com/duynhlab/pkg/grpcx"
+	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
