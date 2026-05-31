@@ -100,16 +100,12 @@ func main() {
 	runGracefulShutdown(cfg, srv, grpcSrv, pool, tp, &isShuttingDown)
 }
 
-// startGRPC starts the internal gRPC server on cfg.GRPC.Port when enabled,
-// serving AuthService.GetMe alongside the HTTP listener (dual-port). Returns nil
-// when disabled. Uses the shared grpcx bootstrap (OpenTelemetry, health,
+// startGRPC starts the internal gRPC server on cfg.GRPC.Port, serving
+// AuthService.GetMe alongside the HTTP listener (dual-port). gRPC is the
+// official east-west transport, so it always runs; it returns nil only if the
+// listener can't bind. Uses the shared grpcx bootstrap (OpenTelemetry, health,
 // reflection).
 func startGRPC(cfg *config.Config, authSvc *logicv1.AuthService) *grpc.Server {
-	if !cfg.GRPC.Enabled {
-		log.Info().Msg("gRPC server disabled (GRPC_ENABLED=false)")
-		return nil
-	}
-
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
 	if err != nil {
