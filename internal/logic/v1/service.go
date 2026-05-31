@@ -15,10 +15,20 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// dummyHash is a precomputed bcrypt hash used to equalize response timing on
-// the user-not-found path so authentication does not leak whether a username
-// exists (CompareHashAndPassword runs in both branches).
-const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+// dummyHash is a bcrypt hash generated at startup — NOT a real credential. It
+// equalizes Login response timing on the user-not-found path so authentication
+// does not leak whether a username exists (CompareHashAndPassword runs in both
+// branches). It is generated rather than hardcoded so no hash literal ships in
+// the source; the input string is a throwaway placeholder, never a password.
+var dummyHash = mustGenerateDummyHash()
+
+func mustGenerateDummyHash() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("not-a-password-placeholder"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("generate dummy bcrypt hash: " + err.Error())
+	}
+	return h
+}
 
 // newSessionToken returns a cryptographically-random opaque session token.
 // It reads 32 bytes from crypto/rand and base64.RawURLEncoding-encodes them.
@@ -63,7 +73,7 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 	if row == nil {
 		// Run bcrypt against a dummy hash to equalize response timing with the
 		// password-mismatch path, preventing username enumeration via timing.
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password))
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(req.Password))
 		span.SetAttributes(attribute.Bool("auth.success", false))
 		span.AddEvent("authentication.failed")
 		return nil, fmt.Errorf("authenticate user %q: %w", req.Username, ErrUserNotFound)
