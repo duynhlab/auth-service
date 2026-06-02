@@ -25,6 +25,7 @@ import (
 	"github.com/duynhlab/auth-service/middleware"
 	"github.com/duynhlab/pkg/grpcx"
 	"github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/obsx"
 	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
@@ -60,6 +61,19 @@ func main() {
 		}
 	} else {
 		log.Info().Msg("Tracing disabled (TRACING_ENABLED=false)")
+	}
+
+	// Initialize metrics: bridge gRPC OTel metrics onto the Prometheus /metrics
+	// endpoint. Must run before grpcx.NewServer/Dial so the otelgrpc handlers
+	// pick up the global MeterProvider.
+	if cfg.Metrics.Enabled {
+		shutdownMetrics, err := obsx.SetupMetrics()
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to initialize metrics")
+		} else {
+			log.Info().Msg("Metrics initialized (gRPC RED metrics on /metrics)")
+			defer func() { _ = shutdownMetrics(context.Background()) }()
+		}
 	}
 
 	// Initialize Pyroscope profiling

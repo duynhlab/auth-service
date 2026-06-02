@@ -6,6 +6,7 @@ import (
 	"time"
 
 	pkgzerolog "github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/obsx"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -14,8 +15,16 @@ import (
 const TraceIDHeader = "X-Trace-ID"
 const TraceParentHeader = "traceparent"
 
-// GetTraceID extracts trace-id from request headers or generates a new one
+// GetTraceID returns a trace-id for the request, preferring the active OTel
+// span so log lines correlate with the trace exported to the backend. It falls
+// back to the inbound trace headers, then a freshly generated id, when tracing
+// is disabled or no span is present.
 func GetTraceID(c *gin.Context) string {
+	// Prefer the span context (tracing middleware runs before logging).
+	if id := obsx.TraceIDFromContext(c.Request.Context()); id != "" {
+		return id
+	}
+
 	// Try W3C Trace Context first (traceparent header)
 	if traceParent := c.GetHeader(TraceParentHeader); traceParent != "" {
 		// traceparent format: version-trace_id-parent_id-flags
