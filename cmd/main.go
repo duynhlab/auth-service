@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/duynhlab/auth-service/config"
+	migrations "github.com/duynhlab/auth-service/db/migrations"
 	database "github.com/duynhlab/auth-service/internal/core"
 	"github.com/duynhlab/auth-service/internal/core/repository"
 	grpcv1 "github.com/duynhlab/auth-service/internal/grpc/v1"
@@ -25,6 +27,7 @@ import (
 	"github.com/duynhlab/auth-service/middleware"
 	"github.com/duynhlab/pkg/grpcx"
 	"github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
@@ -32,12 +35,23 @@ import (
 func main() {
 	// Load configuration
 	cfg := config.Load()
-	if err := cfg.Validate(); err != nil {
-		panic("Configuration validation failed: " + err.Error())
-	}
 
 	// Initialize Zerolog with LOG_LEVEL from config
 	zerolog.Setup(cfg.Logging.Level)
+
+	// `<binary> migrate` runs embedded schema migrations (init container, against
+	// the direct DB host) and exits; no args serves the app.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
+			log.Fatal().Err(err).Msg("Schema migration failed")
+		}
+		log.Info().Msg("Schema migrations applied")
+		return
+	}
+
+	if err := cfg.Validate(); err != nil {
+		panic("Configuration validation failed: " + err.Error())
+	}
 
 	log.Info().
 		Str("service", cfg.Service.Name).
