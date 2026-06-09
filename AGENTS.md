@@ -39,7 +39,7 @@ Issues and validates **opaque, cryptographically-random session tokens** (not JW
 auth-service/
 ├── cmd/                     # Entry point: dual-port (HTTP + gRPC), graceful shutdown
 ├── config/                  # Env-based configuration + validation
-├── db/migrations/           # Flyway SQL migrations + init image (Dockerfile, .trivyignore)
+├── db/migrations/           # golang-migrate SQL migrations (sql/000001_*.up.sql), embedded in the binary via embed.go
 ├── internal/
 │   ├── web/v1/              # HTTP handlers (Gin) — transport
 │   ├── grpc/v1/             # gRPC AuthService server (GetMe) — transport
@@ -117,7 +117,7 @@ flowchart LR
 - The gRPC server impl (`internal/grpc/v1`) is a **transport peer**, not a data layer — it calls Logic and maps errors to gRPC codes. **No DB access in the handler.**
 - **Graceful-shutdown order is fixed** (VictoriaMetrics pattern): `/ready` → 503 → drain delay (`READINESS_DRAIN_DELAY`, default 5s) → HTTP `Shutdown` → gRPC `GracefulStop` → DB pool `Close` → tracer `Shutdown`. Don't reorder.
 - **Kyverno image rules**: deploy images must be `ghcr.io/duynhlab/auth-service/auth:<sha>` (or `:vX.Y.Z`). **Never `:latest`.**
-- The **Flyway init image** (`db/migrations/Dockerfile`) ships upstream JAR CVEs that can't be patched locally — suppress them in `db/migrations/.trivyignore` with a dated reason, never by loosening the scan.
+- Migrations run via the `migrate` subcommand (golang-migrate, embedded in the app binary; the init container reuses the app image), applying forward-only `.up.sql` files.
 - DB has a **dual connection pattern**: main container via PgBouncer (`auth-db-pooler:5432`), init/migration container direct (`auth-db:5432`) for DDL.
 
 ## API reference

@@ -23,4 +23,6 @@ COPY --from=builder /app/auth-service .
 
 EXPOSE 8080
 
-CMD ["./auth-service"]
+# ENTRYPOINT (not CMD) so the migrate init container/compose can pass the
+# `migrate` subcommand via args while the main container serves with no args.
+ENTRYPOINT ["./auth-service"]
