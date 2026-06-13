@@ -7,6 +7,7 @@ import (
 	"github.com/duynhlab/auth-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
 	"github.com/duynhlab/auth-service/middleware"
+	"github.com/duynhlab/pkg/httpx"
 	pkgzerolog "github.com/duynhlab/pkg/logger/zerolog"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
@@ -48,7 +49,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	const bearerPrefix = "Bearer "
 	if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization format"})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid authorization format")
 		return
 	}
 	token := authHeader[len(bearerPrefix):]
@@ -56,7 +57,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	if err := h.auth.Logout(ctx, token); err != nil {
 		span.RecordError(err)
 		logger.Error().Err(err).Msg("Logout failed")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return
 	}
 
@@ -80,7 +81,7 @@ func (h *Handler) Login(c *gin.Context) {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
 		logger.Error().Err(err).Msg("Invalid request")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
 		return
 	}
 
@@ -94,16 +95,16 @@ func (h *Handler) Login(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrInvalidCredentials):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid credentials")
 		case errors.Is(err, logicv1.ErrUserNotFound):
 			// Don't reveal that user doesn't exist (security best practice)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid credentials")
 		case errors.Is(err, logicv1.ErrPasswordExpired):
-			c.JSON(http.StatusForbidden, gin.H{"error": "Password expired"})
+			httpx.RespondError(c, http.StatusForbidden, httpx.CodeForbidden, "Password expired")
 		case errors.Is(err, logicv1.ErrAccountLocked):
-			c.JSON(http.StatusForbidden, gin.H{"error": "Account locked"})
+			httpx.RespondError(c, http.StatusForbidden, httpx.CodeForbidden, "Account locked")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}
@@ -128,7 +129,7 @@ func (h *Handler) Register(c *gin.Context) {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
 		logger.Error().Err(err).Msg("Invalid request")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
 		return
 	}
 
@@ -145,9 +146,9 @@ func (h *Handler) Register(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrUserExists):
-			c.JSON(http.StatusConflict, gin.H{"error": "Username or email already exists"})
+			httpx.RespondError(c, http.StatusConflict, httpx.CodeConflict, "Username or email already exists")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}
@@ -173,7 +174,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" {
 		span.SetAttributes(attribute.Bool("auth.present", false))
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Authorization header required")
 		return
 	}
 
@@ -181,7 +182,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	const bearerPrefix = "Bearer "
 	if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
 		span.SetAttributes(attribute.Bool("auth.valid_format", false))
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization format"})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid authorization format")
 		return
 	}
 	token := authHeader[len(bearerPrefix):]
@@ -196,11 +197,11 @@ func (h *Handler) GetMe(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrSessionNotFound):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid or expired token")
 		case errors.Is(err, logicv1.ErrSessionExpired):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Session expired"})
+			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Session expired")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}
