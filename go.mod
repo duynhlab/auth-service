@@ -6,7 +6,7 @@ require (
 	github.com/duynhlab/pkg v0.6.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/grafana/pyroscope-go v1.3.1
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/zerolog v1.35.1
