@@ -36,3 +36,9 @@ SELECT
     'Auth seed data loaded' as status,
     (SELECT COUNT(*) FROM users) as user_count,
     (SELECT COUNT(*) FROM sessions) as session_count;
+
+-- Sequence realignment (consolidated from the former 000003_fix_sequences):
+-- the seed rows above use explicit ids, so realign the sequences to MAX(id) in
+-- the same migration, or the first app INSERT collides on the primary key.
+SELECT setval('users_id_seq', (SELECT MAX(id) FROM users));
+SELECT setval('sessions_id_seq', (SELECT MAX(id) FROM sessions));
