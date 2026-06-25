@@ -40,3 +40,27 @@ func TestInitTracing_DisabledReturnsError(t *testing.T) {
 		t.Fatal("expected an error when tracing is disabled, got nil")
 	}
 }
+
+// TestInitTracing_WrapsProviderWhenProfilingEnabled covers the traces-to-profiles
+// branch: with profiling enabled, the global tracer provider is wrapped via
+// obsx.TracerProviderWithProfiles so spans carry pyroscope.profile.id.
+func TestInitTracing_WrapsProviderWhenProfilingEnabled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tracing.Enabled = true
+	cfg.Tracing.Endpoint = "localhost:4318"
+	cfg.Tracing.SampleRate = 1.0
+	cfg.Tracing.MaxExportBatchSize = 512
+	cfg.Service.Name = "auth-test"
+	cfg.Profiling.Enabled = true
+
+	tp, err := InitTracing(cfg)
+	if err != nil {
+		t.Fatalf("InitTracing returned an unexpected error: %v", err)
+	}
+	if tp == nil {
+		t.Fatal("InitTracing returned a nil TracerProvider")
+	}
+	if err := tp.Shutdown(context.Background()); err != nil {
+		t.Errorf("TracerProvider.Shutdown returned an error: %v", err)
+	}
+}
