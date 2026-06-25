@@ -92,13 +92,14 @@ func main() {
 
 	// Initialize Pyroscope profiling
 	if cfg.Profiling.Enabled {
-		if err := middleware.InitProfiling(); err != nil {
+		stopProfiling, err := obsx.SetupProfiling()
+		if err != nil {
 			log.Warn().Err(err).Msg("Failed to initialize profiling")
 		} else {
 			log.Info().
 				Str("endpoint", cfg.Profiling.Endpoint).
 				Msg("Profiling initialized")
-			defer middleware.StopProfiling()
+			defer func() { _ = stopProfiling(context.Background()) }()
 		}
 	} else {
 		log.Info().Msg("Profiling disabled (PROFILING_ENABLED=false)")
