@@ -32,19 +32,21 @@ checksum:
 
 # Keyless cosign signature over checksums.txt (covers every artifact via the
 # checksum). cosign is installed by gha-workflows/goreleaser.yml; the job grants
-# id-token: write for OIDC. Verify: cosign verify-blob checksums.txt --signature
-# checksums.txt.sig --certificate checksums.txt.pem
-#   --certificate-identity-regexp '.../goreleaser.yml@.*'
-#   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# id-token: write for OIDC. cosign v3 uses the Sigstore bundle format (sig + cert
+# + Rekor proof in one file) — the old --output-signature/--output-certificate
+# flags are deprecated/ignored. Verify:
+#   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp '.../goreleaser.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 signs:
   - cmd: cosign
     artifacts: checksum
     output: true
+    signature: "${artifact}.sigstore.json" # bundle file goreleaser uploads
     args:
       - sign-blob
       - "--yes"
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - "--bundle=${signature}"
       - "${artifact}"
 
 changelog:
