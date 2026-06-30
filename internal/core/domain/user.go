@@ -19,6 +19,8 @@ type RegisterRequest struct {
 }
 
 type AuthResponse struct {
-	Token string `json:"token"`
-	User  User   `json:"user"`
+	Token       string `json:"token"`
+	AccessToken string `json:"access_token,omitempty"`
+	ExpiresIn   int    `json:"expires_in,omitempty"`
+	User        User   `json:"user"`
 }

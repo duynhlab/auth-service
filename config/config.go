@@ -43,6 +43,7 @@ type Config struct {
 	Metrics         MetricsConfig   // Prometheus metrics
 	Database        DatabaseConfig  // PostgreSQL database configuration
 	GRPC            GRPCConfig      // Internal gRPC server (east-west /me validation)
+	JWT             JWTConfig       // RS256 access-token signing (dual-issue alongside opaque token)
 	ShutdownTimeout int             // Graceful shutdown timeout in seconds - from SHUTDOWN_TIMEOUT env (default: 10)
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
@@ -57,6 +58,18 @@ type Config struct {
 // port is configurable.
 type GRPCConfig struct {
 	Port string // gRPC listen port - from GRPC_PORT env (default: "9090")
+}
+
+// JWTConfig defines RS256 access-token signing. This is additive: a signed JWT
+// is minted alongside the opaque session token (dual-issue). The feature is
+// optional — if PrivateKeyPEM is empty, an ephemeral key is generated at
+// startup (suitable for local/dev, not production).
+type JWTConfig struct {
+	Issuer    string        // Token issuer (iss) - from JWT_ISSUER env
+	Audience  string        // Token audience (aud) - from JWT_AUDIENCE env
+	AccessTTL time.Duration // Access-token lifetime - from JWT_ACCESS_TTL env
+	// nolint:gosec // G117: PEM key material is read from env, never logged
+	PrivateKeyPEM string // RS256 private key (PEM) - from JWT_PRIVATE_KEY_PEM env (empty = ephemeral)
 }
 
 // ServiceConfig defines basic service configuration
@@ -158,6 +171,12 @@ func Load() *Config {
 		},
 		GRPC: GRPCConfig{
 			Port: getEnv("GRPC_PORT", "9090"),
+		},
+		JWT: JWTConfig{
+			Issuer:        getEnv("JWT_ISSUER", "https://gateway.duynh.me"),
+			Audience:      getEnv("JWT_AUDIENCE", "duynhlab-platform"),
+			AccessTTL:     getEnvDuration("JWT_ACCESS_TTL", time.Hour),
+			PrivateKeyPEM: getEnv("JWT_PRIVATE_KEY_PEM", ""),
 		},
 		Database: DatabaseConfig{
 			Host:           getEnv("DB_HOST", ""),
@@ -354,6 +373,20 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 		return defaultValue
 	}
 	return floatValue
+}
+
+// getEnvDuration reads a Go-duration env var (e.g. "1h", "30m") and returns it
+// as a time.Duration. Returns the default on missing or invalid values.
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return defaultValue
+	}
+	return d
 }
 
 // getEnvDurationSeconds reads a duration environment variable and returns seconds as int

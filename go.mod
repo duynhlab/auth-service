@@ -5,6 +5,8 @@ go 1.26.2
 require (
 	github.com/duynhlab/pkg v0.10.0
 	github.com/gin-gonic/gin v1.12.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.23.2
@@ -54,7 +56,6 @@ require (
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang-migrate/migrate/v4 v4.19.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/otel-profiling-go v0.6.0 // indirect
 	github.com/grafana/pyroscope-go v1.3.1 // indirect
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect

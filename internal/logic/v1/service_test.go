@@ -7,12 +7,23 @@ import (
 	"time"
 
 	"github.com/duynhlab/auth-service/internal/core/domain"
+	authjwt "github.com/duynhlab/auth-service/internal/core/jwt"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // errRepo is a shared sentinel used to assert error propagation from the
 // repository layer through the logic layer.
 var errRepo = errors.New("repository failure")
+
+// newTestSigner builds a Signer with an ephemeral key for logic-layer tests.
+func newTestSigner(t *testing.T) *authjwt.Signer {
+	t.Helper()
+	s, _, err := authjwt.NewSigner("", "iss", "aud", time.Hour)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	return s
+}
 
 // fakeUserRepository is a configurable in-memory test double for
 // domain.UserRepository. Each field overrides the behaviour of the matching
@@ -197,7 +208,7 @@ func TestAuthService_Login(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(tt.users, tt.sessions)
+			svc := NewAuthService(tt.users, tt.sessions, nil)
 
 			resp, err := svc.Login(context.Background(), tt.req)
 
@@ -296,7 +307,7 @@ func TestAuthService_Register(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(tt.users, tt.sessions)
+			svc := NewAuthService(tt.users, tt.sessions, nil)
 
 			resp, err := svc.Register(context.Background(), tt.req)
 
@@ -392,7 +403,7 @@ func TestAuthService_GetUserByToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(&fakeUserRepository{}, tt.sessions)
+			svc := NewAuthService(&fakeUserRepository{}, tt.sessions, nil)
 
 			user, err := svc.GetUserByToken(context.Background(), "some-token")
 
@@ -440,7 +451,7 @@ func TestAuthService_Logout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(&fakeUserRepository{}, tt.sessions)
+			svc := NewAuthService(&fakeUserRepository{}, tt.sessions, nil)
 
 			err := svc.Logout(context.Background(), "some-token")
 
@@ -455,4 +466,107 @@ func TestAuthService_Logout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAuthService_DualIssueAccessToken(t *testing.T) {
+	password := "password123"
+	validRow := &domain.UserRow{
+		ID:           7,
+		Username:     "alice",
+		Email:        "alice@example.com",
+		PasswordHash: hashPassword(t, password),
+	}
+
+	t.Run("login mints access token when signer present", func(t *testing.T) {
+		users := &fakeUserRepository{
+			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
+		}
+		svc := NewAuthService(users, &fakeSessionRepository{}, newTestSigner(t))
+
+		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
+		if err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		if resp.AccessToken == "" {
+			t.Error("expected non-empty access token with signer present")
+		}
+		if resp.ExpiresIn != int(time.Hour.Seconds()) {
+			t.Errorf("ExpiresIn = %d, want %d", resp.ExpiresIn, int(time.Hour.Seconds()))
+		}
+		if resp.Token == "" {
+			t.Error("opaque token must still be issued (dual-issue)")
+		}
+	})
+
+	t.Run("login leaves access token empty when signer nil", func(t *testing.T) {
+		users := &fakeUserRepository{
+			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
+		}
+		svc := NewAuthService(users, &fakeSessionRepository{}, nil)
+
+		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
+		if err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		if resp.AccessToken != "" {
+			t.Errorf("expected empty access token with nil signer, got %q", resp.AccessToken)
+		}
+		if resp.ExpiresIn != 0 {
+			t.Errorf("expected ExpiresIn 0, got %d", resp.ExpiresIn)
+		}
+	})
+
+	t.Run("register mints access token when signer present", func(t *testing.T) {
+		users := &fakeUserRepository{
+			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
+		}
+		svc := NewAuthService(users, &fakeSessionRepository{}, newTestSigner(t))
+
+		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
+			Username: "bob", Email: "bob@example.com", Password: "secret1",
+		})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		if resp.AccessToken == "" {
+			t.Error("expected non-empty access token with signer present")
+		}
+	})
+
+	t.Run("register leaves access token empty when signer nil", func(t *testing.T) {
+		users := &fakeUserRepository{
+			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
+		}
+		svc := NewAuthService(users, &fakeSessionRepository{}, nil)
+
+		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
+			Username: "bob", Email: "bob@example.com", Password: "secret1",
+		})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		if resp.AccessToken != "" {
+			t.Errorf("expected empty access token with nil signer, got %q", resp.AccessToken)
+		}
+	})
+}
+
+func TestAuthService_JWKS(t *testing.T) {
+	t.Run("returns body when signer present", func(t *testing.T) {
+		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, newTestSigner(t))
+		body, err := svc.JWKS()
+		if err != nil {
+			t.Fatalf("JWKS: %v", err)
+		}
+		if len(body) == 0 {
+			t.Error("expected non-empty JWKS body")
+		}
+	})
+
+	t.Run("errors when signer nil", func(t *testing.T) {
+		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, nil)
+		if _, err := svc.JWKS(); err == nil {
+			t.Error("expected error with nil signer, got nil")
+		}
+	})
 }
