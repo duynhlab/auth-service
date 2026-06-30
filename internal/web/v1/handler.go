@@ -30,8 +30,22 @@ func NewHandler(auth *logicv1.AuthService) *Handler {
 func (h *Handler) RegisterRoutes(r gin.IRouter) {
 	r.POST("/auth/v1/public/login", h.Login)
 	r.POST("/auth/v1/public/register", h.Register)
+	r.GET("/auth/v1/public/jwks", h.JWKS)
 	r.GET("/auth/v1/private/me", h.GetMe)
 	r.POST("/auth/v1/private/logout", h.Logout)
+}
+
+// JWKS serves the JSON Web Key Set for verifying signed access tokens.
+// GET /auth/v1/public/jwks
+func (h *Handler) JWKS(c *gin.Context) {
+	body, err := h.auth.JWKS()
+	if err != nil {
+		httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "JWKS not available")
+		return
+	}
+	// Public keys rotate rarely; let verifiers and CDNs cache the key set.
+	c.Header("Cache-Control", "public, max-age=300")
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 // Logout revokes the caller's session token. Idempotent — returns 200 on a

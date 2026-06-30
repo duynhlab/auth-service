@@ -20,6 +20,7 @@ import (
 	"github.com/duynhlab/auth-service/config"
 	migrations "github.com/duynhlab/auth-service/db/migrations"
 	database "github.com/duynhlab/auth-service/internal/core"
+	authjwt "github.com/duynhlab/auth-service/internal/core/jwt"
 	"github.com/duynhlab/auth-service/internal/core/repository"
 	grpcv1 "github.com/duynhlab/auth-service/internal/grpc/v1"
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
@@ -77,6 +78,25 @@ func main() {
 		log.Info().Msg("Tracing disabled (TRACING_ENABLED=false)")
 	}
 
+	// RS256 access-token signer (dual-issue alongside the opaque session token).
+	// Built before the observability defers below so a fatal key-config error is
+	// not flagged by gocritic's exitAfterDefer (and fails fast).
+	signer, ephemeral, err := authjwt.NewSigner(cfg.JWT.PrivateKeyPEM, cfg.JWT.Issuer, cfg.JWT.Audience, cfg.JWT.AccessTTL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize JWT signer")
+	}
+	if ephemeral {
+		// An ephemeral per-pod key breaks multi-replica verification (each pod
+		// serves a different JWKS) and invalidates all tokens on restart — refuse
+		// it in production; keep the convenience for local/dev only.
+		if cfg.IsProduction() {
+			log.Fatal().Msg("JWT_PRIVATE_KEY_PEM is required in production — refusing to start with an ephemeral signing key")
+		}
+		log.Warn().Msg("JWT signing key not configured (JWT_PRIVATE_KEY_PEM) — using an EPHEMERAL key; set a stable key in production")
+	} else {
+		log.Info().Str("kid", signer.Kid()).Msg("JWT signer initialized")
+	}
+
 	// Initialize metrics: bridge gRPC OTel metrics onto the Prometheus /metrics
 	// endpoint. Must run before grpcx.NewServer/Dial so the otelgrpc handlers
 	// pick up the global MeterProvider.
@@ -117,7 +137,8 @@ func main() {
 	// Wire dependencies: Core repositories -> Logic service -> Web handler
 	userRepo := repository.NewUserRepository(pool)
 	sessionRepo := repository.NewSessionRepository(pool)
-	authSvc := logicv1.NewAuthService(userRepo, sessionRepo)
+
+	authSvc := logicv1.NewAuthService(userRepo, sessionRepo, signer)
 	handler := webv1.NewHandler(authSvc)
 
 	// Optional internal gRPC server (AuthService.GetMe). HTTP :8080 is unaffected.

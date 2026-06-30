@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/duynhlab/auth-service/internal/core/domain"
+	authjwt "github.com/duynhlab/auth-service/internal/core/jwt"
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -55,7 +56,7 @@ func (m *mockSessionRepo) GetUserByToken(_ context.Context, _ string) (*domain.S
 func (m *mockSessionRepo) Delete(_ context.Context, _ string) error { return m.deleteErr }
 
 func newHandler(users domain.UserRepository, sessions domain.SessionRepository) *Handler {
-	return NewHandler(logicv1.NewAuthService(users, sessions))
+	return NewHandler(logicv1.NewAuthService(users, sessions, nil))
 }
 
 func newCtx(method, target, body string, hdr map[string]string) (*gin.Context, *httptest.ResponseRecorder) {
@@ -323,5 +324,41 @@ func TestLogout_Success(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- JWKS ---
+
+func TestJWKS_NoSigner(t *testing.T) {
+	c, rec := newCtx(http.MethodGet, "/auth/v1/public/jwks", "", nil)
+	newHandler(&mockUserRepo{}, &mockSessionRepo{}).JWKS(c)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "NOT_FOUND" {
+		t.Errorf("code = %v, want NOT_FOUND", code)
+	}
+}
+
+func TestJWKS_WithSigner(t *testing.T) {
+	signer, _, err := authjwt.NewSigner("", "iss", "aud", time.Hour)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	h := NewHandler(logicv1.NewAuthService(&mockUserRepo{}, &mockSessionRepo{}, signer))
+
+	c, rec := newCtx(http.MethodGet, "/auth/v1/public/jwks", "", nil)
+	h.JWKS(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json", ct)
+	}
+	body := decode(t, rec)
+	if _, ok := body["keys"]; !ok {
+		t.Errorf("expected 'keys' in JWKS body, got %v", body)
 	}
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/duynhlab/auth-service/internal/core/domain"
+	authjwt "github.com/duynhlab/auth-service/internal/core/jwt"
 	"github.com/duynhlab/auth-service/middleware"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -46,13 +48,17 @@ func newSessionToken() (string, error) {
 type AuthService struct {
 	users    domain.UserRepository
 	sessions domain.SessionRepository
+	signer   *authjwt.Signer
 }
 
-// NewAuthService creates a new AuthService with the given repository dependencies.
-func NewAuthService(users domain.UserRepository, sessions domain.SessionRepository) *AuthService {
+// NewAuthService creates a new AuthService with the given repository
+// dependencies. signer may be nil, in which case no signed access token is
+// minted (the opaque session token is still issued).
+func NewAuthService(users domain.UserRepository, sessions domain.SessionRepository, signer *authjwt.Signer) *AuthService {
 	return &AuthService{
 		users:    users,
 		sessions: sessions,
+		signer:   signer,
 	}
 }
 
@@ -116,6 +122,10 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 		User:  user,
 	}
 
+	// Dual-issue: mint a signed RS256 access token alongside the opaque token.
+	// Best-effort — a mint failure must not fail the login.
+	s.mintAccessToken(span, response)
+
 	span.SetAttributes(
 		attribute.String("user.id", user.ID),
 		attribute.Bool("auth.success", true),
@@ -123,6 +133,22 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 	span.AddEvent("user.authenticated")
 
 	return response, nil
+}
+
+// mintAccessToken adds a signed RS256 access token to response when a signer is
+// configured. It is best-effort: on error it records the span error and leaves
+// the opaque token untouched.
+func (s *AuthService) mintAccessToken(span trace.Span, response *domain.AuthResponse) {
+	if s.signer == nil {
+		return
+	}
+	access, expiresIn, err := s.signer.MintAccess(response.User.ID, response.User.Username, response.User.Email)
+	if err != nil {
+		span.RecordError(fmt.Errorf("mint access token: %w", err))
+		return
+	}
+	response.AccessToken = access
+	response.ExpiresIn = expiresIn
 }
 
 // Register handles user registration business logic.
@@ -183,6 +209,9 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 		User:  user,
 	}
 
+	// Dual-issue: mint a signed RS256 access token alongside the opaque token.
+	s.mintAccessToken(span, response)
+
 	span.SetAttributes(
 		attribute.String("user.id", user.ID),
 		attribute.Bool("registration.success", true),
@@ -190,6 +219,15 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	span.AddEvent("user.registered")
 
 	return response, nil
+}
+
+// JWKS returns the JSON Web Key Set for the access-token signing key. Returns an
+// error when no signer is configured.
+func (s *AuthService) JWKS() ([]byte, error) {
+	if s.signer == nil {
+		return nil, errors.New("JWKS unavailable: no signer configured")
+	}
+	return s.signer.JWKS()
 }
 
 // GetUserByToken retrieves user info from a session token (for /auth/me endpoint).
