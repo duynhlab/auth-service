@@ -130,7 +130,7 @@ func main() {
 	}
 
 	// Initialize database connection pool (pgx)
-	pool, err := database.Connect(context.Background())
+	pool, err := database.Connect(context.Background(), cfg.Database)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to connect to database")
 		return
