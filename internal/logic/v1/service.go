@@ -324,6 +324,11 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*dom
 	if s.signer == nil {
 		return nil, errors.New("refresh unavailable: no signer configured")
 	}
+	// The repository is optional by contract (NewAuthService allows nil); guard
+	// it here so a signer-but-no-repo deployment fails closed instead of panicking.
+	if s.refreshTokens == nil {
+		return nil, ErrRefreshInvalid
+	}
 
 	hash := hashToken(rawRefreshToken)
 

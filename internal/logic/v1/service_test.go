@@ -761,6 +761,13 @@ func TestAuthService_Refresh(t *testing.T) {
 		}
 	})
 
+	t.Run("nil refresh repository fails closed without panic", func(t *testing.T) {
+		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, nil, newTestSigner(t), time.Hour)
+		if _, err := svc.Refresh(context.Background(), "raw-refresh-token"); !errors.Is(err, ErrRefreshInvalid) {
+			t.Errorf("err = %v, want ErrRefreshInvalid", err)
+		}
+	})
+
 	t.Run("lost rotation race (claimed=false) revokes family and returns ErrRefreshReuse", func(t *testing.T) {
 		const family = "fam-race"
 		row := &domain.RefreshTokenRow{
