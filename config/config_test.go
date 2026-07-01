@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 )
 
 // clearEnv unsets every env var Load reads, so a test starts from a known state.
@@ -101,6 +102,10 @@ func validConfig() *Config {
 	c.Profiling.ServiceName = "auth"
 	c.Logging.Level = "info"
 	c.Logging.Format = "json"
+	c.JWT.Issuer = "https://gateway.duynh.me"
+	c.JWT.Audience = "duynhlab-platform"
+	c.JWT.AccessTTL = time.Hour
+	c.JWT.RefreshTTL = 720 * time.Hour
 	return c
 }
 
@@ -138,6 +143,12 @@ func TestValidate(t *testing.T) {
 			c.Database.Password = "p"
 			c.Database.Port = "abc"
 		}, true},
+		{"jwt issuer empty", func(c *Config) { c.JWT.Issuer = "" }, true},
+		{"jwt audience empty", func(c *Config) { c.JWT.Audience = "" }, true},
+		{"jwt access ttl zero", func(c *Config) { c.JWT.AccessTTL = 0 }, true},
+		{"jwt access ttl negative", func(c *Config) { c.JWT.AccessTTL = -time.Hour }, true},
+		{"jwt refresh ttl not greater than access", func(c *Config) { c.JWT.RefreshTTL = c.JWT.AccessTTL }, true},
+		{"jwt refresh ttl less than access", func(c *Config) { c.JWT.AccessTTL = time.Hour; c.JWT.RefreshTTL = time.Minute }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

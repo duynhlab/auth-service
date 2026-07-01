@@ -206,6 +206,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.validateProfiling()...)
 	errs = append(errs, c.validateLogging()...)
 	errs = append(errs, c.validateDatabase()...)
+	errs = append(errs, c.validateJWT()...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errs, "\n  - "))
@@ -311,6 +312,26 @@ func (c *Config) validateDatabase() []string {
 		if _, err := strconv.Atoi(c.Database.Port); err != nil {
 			errs = append(errs, "DB_PORT must be a valid number, got: "+c.Database.Port)
 		}
+	}
+
+	return errs
+}
+
+// validateJWT validates JWT access-token signing configuration fields
+func (c *Config) validateJWT() []string {
+	var errs []string
+
+	if c.JWT.Issuer == "" {
+		errs = append(errs, "JWT_ISSUER is required (token issuer 'iss' claim)")
+	}
+	if c.JWT.Audience == "" {
+		errs = append(errs, "JWT_AUDIENCE is required (token audience 'aud' claim)")
+	}
+	if c.JWT.AccessTTL <= 0 {
+		errs = append(errs, fmt.Sprintf("JWT_ACCESS_TTL must be greater than 0, got: %s", c.JWT.AccessTTL))
+	}
+	if c.JWT.RefreshTTL <= c.JWT.AccessTTL {
+		errs = append(errs, fmt.Sprintf("JWT_REFRESH_TTL (%s) must be greater than JWT_ACCESS_TTL (%s)", c.JWT.RefreshTTL, c.JWT.AccessTTL))
 	}
 
 	return errs

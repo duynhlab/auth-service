@@ -97,6 +97,31 @@ func applyMigrations(t *testing.T, ctx context.Context, dsn string) {
 			t.Fatalf("apply migration %s: %v", f, err)
 		}
 	}
+
+	// Apply the dev seed (demo users) too — it lives outside the migration chain
+	// (db/seed/sql), so read-path tests must load it explicitly here.
+	seedDir := filepath.Join("..", "..", "..", "db", "seed", "sql")
+	seedEntries, err := os.ReadDir(seedDir)
+	if err != nil {
+		t.Fatalf("read seed dir: %v", err)
+	}
+	var seedFiles []string
+	for _, e := range seedEntries {
+		name := e.Name()
+		if !e.IsDir() && len(name) > 7 && name[len(name)-7:] == ".up.sql" {
+			seedFiles = append(seedFiles, name)
+		}
+	}
+	sort.Strings(seedFiles)
+	for _, f := range seedFiles {
+		sqlBytes, err := os.ReadFile(filepath.Join(seedDir, f))
+		if err != nil {
+			t.Fatalf("read seed %s: %v", f, err)
+		}
+		if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply seed %s: %v", f, err)
+		}
+	}
 }
 
 func TestUserRepository_Integration(t *testing.T) {
@@ -160,13 +185,25 @@ func TestSessionRepository_Integration(t *testing.T) {
 	repo := NewSessionRepository(pool)
 	ctx := context.Background()
 
-	t.Run("GetUserByToken resolves a seeded session", func(t *testing.T) {
-		row, err := repo.GetUserByToken(ctx, "demo_token_alice_12345")
+	t.Run("GetUserByToken resolves an inserted session", func(t *testing.T) {
+		var uid int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO users(username, email, password_hash) VALUES('sessuser','sessuser@example.com','h') RETURNING id`,
+		).Scan(&uid); err != nil {
+			t.Fatalf("insert user: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO sessions(user_id, token, expires_at) VALUES($1, $2, now() + interval '1 hour')`,
+			uid, "sess-token-integration",
+		); err != nil {
+			t.Fatalf("insert session: %v", err)
+		}
+		row, err := repo.GetUserByToken(ctx, "sess-token-integration")
 		if err != nil {
 			t.Fatalf("GetUserByToken: %v", err)
 		}
-		if row == nil || row.UserID != 1 || row.Username != "alice" {
-			t.Errorf("row = %+v, want alice (user 1)", row)
+		if row == nil || row.UserID != uid || row.Username != "sessuser" {
+			t.Errorf("row = %+v, want sessuser (user %d)", row, uid)
 		}
 	})
 
