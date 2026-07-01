@@ -97,6 +97,31 @@ func applyMigrations(t *testing.T, ctx context.Context, dsn string) {
 			t.Fatalf("apply migration %s: %v", f, err)
 		}
 	}
+
+	// Apply the dev seed (demo users) too — it lives outside the migration chain
+	// (db/seed/sql), so read-path tests must load it explicitly here.
+	seedDir := filepath.Join("..", "..", "..", "db", "seed", "sql")
+	seedEntries, err := os.ReadDir(seedDir)
+	if err != nil {
+		t.Fatalf("read seed dir: %v", err)
+	}
+	var seedFiles []string
+	for _, e := range seedEntries {
+		name := e.Name()
+		if !e.IsDir() && len(name) > 7 && name[len(name)-7:] == ".up.sql" {
+			seedFiles = append(seedFiles, name)
+		}
+	}
+	sort.Strings(seedFiles)
+	for _, f := range seedFiles {
+		sqlBytes, err := os.ReadFile(filepath.Join(seedDir, f))
+		if err != nil {
+			t.Fatalf("read seed %s: %v", f, err)
+		}
+		if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply seed %s: %v", f, err)
+		}
+	}
 }
 
 func TestUserRepository_Integration(t *testing.T) {
@@ -160,13 +185,25 @@ func TestSessionRepository_Integration(t *testing.T) {
 	repo := NewSessionRepository(pool)
 	ctx := context.Background()
 
-	t.Run("GetUserByToken resolves a seeded session", func(t *testing.T) {
-		row, err := repo.GetUserByToken(ctx, "demo_token_alice_12345")
+	t.Run("GetUserByToken resolves an inserted session", func(t *testing.T) {
+		var uid int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO users(username, email, password_hash) VALUES('sessuser','sessuser@example.com','h') RETURNING id`,
+		).Scan(&uid); err != nil {
+			t.Fatalf("insert user: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO sessions(user_id, token, expires_at) VALUES($1, $2, now() + interval '1 hour')`,
+			uid, "sess-token-integration",
+		); err != nil {
+			t.Fatalf("insert session: %v", err)
+		}
+		row, err := repo.GetUserByToken(ctx, "sess-token-integration")
 		if err != nil {
 			t.Fatalf("GetUserByToken: %v", err)
 		}
-		if row == nil || row.UserID != 1 || row.Username != "alice" {
-			t.Errorf("row = %+v, want alice (user 1)", row)
+		if row == nil || row.UserID != uid || row.Username != "sessuser" {
+			t.Errorf("row = %+v, want sessuser (user %d)", row, uid)
 		}
 	})
 
@@ -202,6 +239,119 @@ func TestSessionRepository_Integration(t *testing.T) {
 		// Deleting an already-deleted token is a no-op.
 		if err := repo.Delete(ctx, token); err != nil {
 			t.Errorf("second Delete: %v", err)
+		}
+	})
+}
+
+func TestRefreshTokenRepository_Integration(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewRefreshTokenRepository(pool)
+	ctx := context.Background()
+
+	const family = "11111111-1111-1111-1111-111111111111"
+
+	t.Run("Create then GetByHash joins the user", func(t *testing.T) {
+		const hash = "aaaa000000000000000000000000000000000000000000000000000000000001"
+		if err := repo.Create(ctx, 1, hash, family, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		row, err := repo.GetByHash(ctx, hash)
+		if err != nil {
+			t.Fatalf("GetByHash: %v", err)
+		}
+		if row == nil || row.UserID != 1 || row.Username != "alice" || row.FamilyID != family {
+			t.Errorf("row = %+v, want alice (user 1) family %s", row, family)
+		}
+		if row.UsedAt != nil {
+			t.Errorf("UsedAt = %v, want nil for a fresh token", row.UsedAt)
+		}
+	})
+
+	t.Run("GetByHash returns nil,nil for unknown hash", func(t *testing.T) {
+		row, err := repo.GetByHash(ctx, "deadbeef00000000000000000000000000000000000000000000000000000000")
+		if err != nil {
+			t.Fatalf("GetByHash(absent): %v", err)
+		}
+		if row != nil {
+			t.Errorf("row = %+v, want nil", row)
+		}
+	})
+
+	t.Run("Rotate claims the old token and inserts the new one atomically", func(t *testing.T) {
+		const oldHash = "aaaa000000000000000000000000000000000000000000000000000000000002"
+		const newHash = "aaaa000000000000000000000000000000000000000000000000000000000003"
+		if err := repo.Create(ctx, 1, oldHash, family, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		claimed, err := repo.Rotate(ctx, oldHash, newHash, family, 1, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		if !claimed {
+			t.Fatal("Rotate claimed = false, want true for a fresh unused token")
+		}
+		oldRow, err := repo.GetByHash(ctx, oldHash)
+		if err != nil || oldRow == nil {
+			t.Fatalf("GetByHash(old) after Rotate: row=%+v err=%v", oldRow, err)
+		}
+		if oldRow.UsedAt == nil {
+			t.Error("old UsedAt = nil after Rotate, want a timestamp")
+		}
+		newRow, err := repo.GetByHash(ctx, newHash)
+		if err != nil || newRow == nil {
+			t.Fatalf("GetByHash(new) after Rotate: row=%+v err=%v", newRow, err)
+		}
+		if newRow.FamilyID != family || newRow.UsedAt != nil {
+			t.Errorf("new row = %+v, want same family and nil UsedAt", newRow)
+		}
+
+		// Rotating an already-used token claims nothing (concurrent/replayed use).
+		const raceHash = "aaaa000000000000000000000000000000000000000000000000000000000004"
+		claimed, err = repo.Rotate(ctx, oldHash, raceHash, family, 1, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("Rotate(used): %v", err)
+		}
+		if claimed {
+			t.Error("Rotate claimed = true for an already-used token, want false")
+		}
+		if row, _ := repo.GetByHash(ctx, raceHash); row != nil {
+			t.Errorf("row = %+v inserted for a failed claim, want nil", row)
+		}
+
+		// Rotating an absent token claims nothing.
+		claimed, err = repo.Rotate(ctx, "nope", raceHash, family, 1, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Errorf("Rotate(absent): %v", err)
+		}
+		if claimed {
+			t.Error("Rotate claimed = true for an absent token, want false")
+		}
+	})
+
+	t.Run("RevokeFamily deletes all rows and is idempotent", func(t *testing.T) {
+		const revokeFamily = "22222222-2222-2222-2222-222222222222"
+		const h1 = "bbbb000000000000000000000000000000000000000000000000000000000001"
+		const h2 = "bbbb000000000000000000000000000000000000000000000000000000000002"
+		for _, h := range []string{h1, h2} {
+			if err := repo.Create(ctx, 2, h, revokeFamily, time.Now().Add(time.Hour)); err != nil {
+				t.Fatalf("Create %s: %v", h, err)
+			}
+		}
+		if err := repo.RevokeFamily(ctx, revokeFamily); err != nil {
+			t.Fatalf("RevokeFamily: %v", err)
+		}
+		for _, h := range []string{h1, h2} {
+			row, err := repo.GetByHash(ctx, h)
+			if err != nil {
+				t.Fatalf("GetByHash after revoke: %v", err)
+			}
+			if row != nil {
+				t.Errorf("row = %+v after revoke, want nil", row)
+			}
+		}
+		// Revoking an empty family is a no-op.
+		if err := repo.RevokeFamily(ctx, revokeFamily); err != nil {
+			t.Errorf("second RevokeFamily: %v", err)
 		}
 	})
 }

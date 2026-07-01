@@ -14,6 +14,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// msgInvalidRequestBody is the 400 response body for malformed request JSON.
+const msgInvalidRequestBody = "Invalid request body"
+
+// logMsgInvalidRequest is the log message for a request that failed binding.
+const logMsgInvalidRequest = "Invalid request"
+
 // Handler groups HTTP handlers for the auth API v1.
 // Dependencies are injected via the constructor — no global state.
 type Handler struct {
@@ -30,6 +36,7 @@ func NewHandler(auth *logicv1.AuthService) *Handler {
 func (h *Handler) RegisterRoutes(r gin.IRouter) {
 	r.POST("/auth/v1/public/login", h.Login)
 	r.POST("/auth/v1/public/register", h.Register)
+	r.POST("/auth/v1/public/refresh", h.Refresh)
 	r.GET("/auth/v1/public/jwks", h.JWKS)
 	r.GET("/auth/v1/private/me", h.GetMe)
 	r.POST("/auth/v1/private/logout", h.Logout)
@@ -94,8 +101,8 @@ func (h *Handler) Login(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Invalid request")
-		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 
@@ -142,8 +149,8 @@ func (h *Handler) Register(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Invalid request")
-		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 
@@ -169,6 +176,47 @@ func (h *Handler) Register(c *gin.Context) {
 
 	logger.Info().Str("user_id", response.User.ID).Msg("Registration successful")
 	c.JSON(http.StatusCreated, response)
+}
+
+// Refresh rotates a refresh token and returns a fresh access + refresh token.
+// POST /auth/v1/public/refresh  Body: {"refresh_token": "..."}
+func (h *Handler) Refresh(c *gin.Context) {
+	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
+		attribute.String("layer", "web"),
+		attribute.String("method", c.Request.Method),
+		attribute.String("path", c.Request.URL.Path),
+	))
+	defer span.End()
+
+	logger := pkgzerolog.FromContext(ctx)
+
+	var req domain.RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		span.SetAttributes(attribute.Bool("request.valid", false))
+		span.RecordError(err)
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
+		return
+	}
+
+	span.SetAttributes(attribute.Bool("request.valid", true))
+
+	response, err := h.auth.Refresh(ctx, req.RefreshToken)
+	if err != nil {
+		span.RecordError(err)
+		logger.Warn().Err(err).Msg("Refresh failed")
+
+		switch {
+		case errors.Is(err, logicv1.ErrRefreshInvalid), errors.Is(err, logicv1.ErrRefreshReuse):
+			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid refresh token")
+		default:
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+		}
+		return
+	}
+
+	logger.Info().Str("user_id", response.User.ID).Msg("Refresh successful")
+	c.JSON(http.StatusOK, response)
 }
 
 // GetMe handles HTTP request to get current user from session token.
