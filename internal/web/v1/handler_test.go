@@ -55,8 +55,31 @@ func (m *mockSessionRepo) GetUserByToken(_ context.Context, _ string) (*domain.S
 }
 func (m *mockSessionRepo) Delete(_ context.Context, _ string) error { return m.deleteErr }
 
+// mockRefreshRepo is a configurable domain.RefreshTokenRepository double for web tests.
+type mockRefreshRepo struct {
+	row       *domain.RefreshTokenRow
+	getErr    error
+	createErr error
+	rotate    func() (bool, error)
+	revokeErr error
+}
+
+func (m *mockRefreshRepo) Create(_ context.Context, _ int, _, _ string, _ time.Time) error {
+	return m.createErr
+}
+func (m *mockRefreshRepo) GetByHash(_ context.Context, _ string) (*domain.RefreshTokenRow, error) {
+	return m.row, m.getErr
+}
+func (m *mockRefreshRepo) Rotate(_ context.Context, _, _, _ string, _ int, _ time.Time) (bool, error) {
+	if m.rotate != nil {
+		return m.rotate()
+	}
+	return true, nil
+}
+func (m *mockRefreshRepo) RevokeFamily(_ context.Context, _ string) error { return m.revokeErr }
+
 func newHandler(users domain.UserRepository, sessions domain.SessionRepository) *Handler {
-	return NewHandler(logicv1.NewAuthService(users, sessions, nil))
+	return NewHandler(logicv1.NewAuthService(users, sessions, nil, nil, 0))
 }
 
 func newCtx(method, target, body string, hdr map[string]string) (*gin.Context, *httptest.ResponseRecorder) {
@@ -214,6 +237,102 @@ func TestRegister_Success(t *testing.T) {
 	}
 }
 
+// --- Refresh ---
+
+func newRefreshHandler(t *testing.T, refresh domain.RefreshTokenRepository) *Handler {
+	t.Helper()
+	signer, _, err := authjwt.NewSigner("", "iss", "aud", time.Hour)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	return NewHandler(logicv1.NewAuthService(&mockUserRepo{}, &mockSessionRepo{}, refresh, signer, time.Hour))
+}
+
+func TestRefresh_BadJSON(t *testing.T) {
+	h := newRefreshHandler(t, &mockRefreshRepo{})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", "{", nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "VALIDATION_ERROR" {
+		t.Errorf("code = %v, want VALIDATION_ERROR", code)
+	}
+}
+
+func TestRefresh_MissingToken(t *testing.T) {
+	h := newRefreshHandler(t, &mockRefreshRepo{})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{}`, nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "VALIDATION_ERROR" {
+		t.Errorf("code = %v, want VALIDATION_ERROR", code)
+	}
+}
+
+func TestRefresh_Invalid(t *testing.T) {
+	h := newRefreshHandler(t, &mockRefreshRepo{row: nil})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"nope"}`, nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "UNAUTHORIZED" {
+		t.Errorf("code = %v, want UNAUTHORIZED", code)
+	}
+}
+
+func TestRefresh_Reuse(t *testing.T) {
+	used := time.Now().Add(-time.Minute)
+	row := &domain.RefreshTokenRow{UserID: 7, Username: "alice", FamilyID: "fam", UsedAt: &used, ExpiresAt: time.Now().Add(time.Hour)}
+	h := newRefreshHandler(t, &mockRefreshRepo{row: row})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"replayed"}`, nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "UNAUTHORIZED" {
+		t.Errorf("code = %v, want UNAUTHORIZED", code)
+	}
+}
+
+func TestRefresh_ServiceError(t *testing.T) {
+	h := newRefreshHandler(t, &mockRefreshRepo{getErr: context.DeadlineExceeded})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"x"}`, nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if code := decode(t, rec)["code"]; code != "INTERNAL_ERROR" {
+		t.Errorf("code = %v, want INTERNAL_ERROR", code)
+	}
+}
+
+func TestRefresh_Success(t *testing.T) {
+	row := &domain.RefreshTokenRow{UserID: 7, Username: "alice", Email: "a@x.io", FamilyID: "fam", ExpiresAt: time.Now().Add(time.Hour)}
+	h := newRefreshHandler(t, &mockRefreshRepo{row: row})
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"valid"}`, nil)
+	h.Refresh(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if _, ok := body["access_token"]; !ok {
+		t.Errorf("response missing access_token: %s", rec.Body.String())
+	}
+	if _, ok := body["refresh_token"]; !ok {
+		t.Errorf("response missing refresh_token: %s", rec.Body.String())
+	}
+}
+
 // --- GetMe ---
 
 func TestGetMe_NoHeader(t *testing.T) {
@@ -346,7 +465,7 @@ func TestJWKS_WithSigner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new signer: %v", err)
 	}
-	h := NewHandler(logicv1.NewAuthService(&mockUserRepo{}, &mockSessionRepo{}, signer))
+	h := NewHandler(logicv1.NewAuthService(&mockUserRepo{}, &mockSessionRepo{}, nil, signer, 0))
 
 	c, rec := newCtx(http.MethodGet, "/auth/v1/public/jwks", "", nil)
 	h.JWKS(c)

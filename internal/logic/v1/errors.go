@@ -63,4 +63,13 @@ var (
 	// ErrSessionExpired indicates the session token has expired.
 	// HTTP Status: 401 Unauthorized
 	ErrSessionExpired = errors.New("session expired")
+
+	// ErrRefreshInvalid indicates the refresh token is unknown, expired, or
+	// otherwise not usable. HTTP Status: 401 Unauthorized.
+	ErrRefreshInvalid = errors.New("refresh token invalid")
+
+	// ErrRefreshReuse indicates a previously-rotated refresh token was replayed,
+	// which signals theft; the whole token family is revoked.
+	// HTTP Status: 401 Unauthorized.
+	ErrRefreshReuse = errors.New("refresh token reuse detected")
 )

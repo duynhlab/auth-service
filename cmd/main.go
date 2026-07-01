@@ -137,8 +137,9 @@ func main() {
 	// Wire dependencies: Core repositories -> Logic service -> Web handler
 	userRepo := repository.NewUserRepository(pool)
 	sessionRepo := repository.NewSessionRepository(pool)
+	refreshRepo := repository.NewRefreshTokenRepository(pool)
 
-	authSvc := logicv1.NewAuthService(userRepo, sessionRepo, signer)
+	authSvc := logicv1.NewAuthService(userRepo, sessionRepo, refreshRepo, signer, cfg.JWT.RefreshTTL)
 	handler := webv1.NewHandler(authSvc)
 
 	// Optional internal gRPC server (AuthService.GetMe). HTTP :8080 is unaffected.

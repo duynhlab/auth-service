@@ -65,9 +65,10 @@ type GRPCConfig struct {
 // optional — if PrivateKeyPEM is empty, an ephemeral key is generated at
 // startup (suitable for local/dev, not production).
 type JWTConfig struct {
-	Issuer    string        // Token issuer (iss) - from JWT_ISSUER env
-	Audience  string        // Token audience (aud) - from JWT_AUDIENCE env
-	AccessTTL time.Duration // Access-token lifetime - from JWT_ACCESS_TTL env
+	Issuer     string        // Token issuer (iss) - from JWT_ISSUER env
+	Audience   string        // Token audience (aud) - from JWT_AUDIENCE env
+	AccessTTL  time.Duration // Access-token lifetime - from JWT_ACCESS_TTL env
+	RefreshTTL time.Duration // Refresh-token lifetime - from JWT_REFRESH_TTL env (default: 720h / 30d)
 	// nolint:gosec // G117: PEM key material is read from env, never logged
 	PrivateKeyPEM string // RS256 private key (PEM) - from JWT_PRIVATE_KEY_PEM env (empty = ephemeral)
 }
@@ -176,6 +177,7 @@ func Load() *Config {
 			Issuer:        getEnv("JWT_ISSUER", "https://gateway.duynh.me"),
 			Audience:      getEnv("JWT_AUDIENCE", "duynhlab-platform"),
 			AccessTTL:     getEnvDuration("JWT_ACCESS_TTL", time.Hour),
+			RefreshTTL:    getEnvDuration("JWT_REFRESH_TTL", 720*time.Hour),
 			PrivateKeyPEM: getEnv("JWT_PRIVATE_KEY_PEM", ""),
 		},
 		Database: DatabaseConfig{
