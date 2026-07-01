@@ -14,6 +14,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// msgInvalidRequestBody is the 400 response body for malformed request JSON.
+const msgInvalidRequestBody = "Invalid request body"
+
+// logMsgInvalidRequest is the log message for a request that failed binding.
+const logMsgInvalidRequest = "Invalid request"
+
 // Handler groups HTTP handlers for the auth API v1.
 // Dependencies are injected via the constructor — no global state.
 type Handler struct {
@@ -95,8 +101,8 @@ func (h *Handler) Login(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Invalid request")
-		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 
@@ -143,8 +149,8 @@ func (h *Handler) Register(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Invalid request")
-		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 
@@ -188,8 +194,8 @@ func (h *Handler) Refresh(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Invalid request")
-		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid request body")
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 

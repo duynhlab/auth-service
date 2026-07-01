@@ -20,6 +20,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// attrRefreshValid is the span attribute key recording refresh-token validity.
+const attrRefreshValid = "refresh.valid"
+
 // dummyHash is a bcrypt hash generated at startup — NOT a real credential. It
 // equalizes Login response timing on the user-not-found path so authentication
 // does not leak whether a username exists (CompareHashAndPassword runs in both
@@ -330,12 +333,12 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*dom
 		return nil, fmt.Errorf("query refresh token: %w", err)
 	}
 	if row == nil {
-		span.SetAttributes(attribute.Bool("refresh.valid", false))
+		span.SetAttributes(attribute.Bool(attrRefreshValid, false))
 		return nil, fmt.Errorf("lookup refresh token: %w", ErrRefreshInvalid)
 	}
 
 	if time.Now().After(row.ExpiresAt) {
-		span.SetAttributes(attribute.Bool("refresh.valid", false))
+		span.SetAttributes(attribute.Bool(attrRefreshValid, false))
 		return nil, fmt.Errorf("refresh token expired at %v: %w", row.ExpiresAt, ErrRefreshInvalid)
 	}
 
@@ -371,7 +374,7 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*dom
 
 	span.SetAttributes(
 		attribute.String("user.id", strconv.Itoa(row.UserID)),
-		attribute.Bool("refresh.valid", true),
+		attribute.Bool(attrRefreshValid, true),
 	)
 	span.AddEvent("refresh.rotated")
 
