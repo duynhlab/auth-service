@@ -31,18 +31,17 @@ Tight, imperative reference for AI agents. Read this before touching the repo.
 
 `auth-service` — authentication microservice. Module `github.com/duynhlab/auth-service`.
 
-Issues and validates **opaque, cryptographically-random session tokens** (not JWT, 24h expiry). Handles login, registration, logout, and current-user lookup. Exposes an HTTP API (browser + in-cluster) and a gRPC `AuthService/GetMe` server — the latter is the east-west authority every other service calls to validate bearer tokens.
+Issues **RS256 JWT access tokens** — the only credential (RFC-0009 Phase 5) — plus rotating, sha256-hashed, family-tracked refresh tokens with reuse detection. Handles login, registration, refresh, and logout (revokes the token family), and publishes the JWKS. **HTTP-only** — there is no gRPC server; every other service verifies JWTs locally against the JWKS.
 
 ## Repository layout
 
 ```
 auth-service/
-├── cmd/                     # Entry point: dual-port (HTTP + gRPC), graceful shutdown
+├── cmd/                     # Entry point: HTTP server, graceful shutdown
 ├── config/                  # Env-based configuration + validation
 ├── db/migrations/           # golang-migrate SQL migrations (sql/000001_*.up.sql), embedded in the binary via embed.go
 ├── internal/
 │   ├── web/v1/              # HTTP handlers (Gin) — transport
-│   ├── grpc/v1/             # gRPC AuthService server (GetMe) — transport
 │   ├── logic/v1/            # Business rules + domain errors (NO SQL)
 │   └── core/                # Domain models, repository interfaces, pgx implementations, DB pool
 ├── middleware/              # tracing, logging, prometheus, profiling, resource
@@ -89,26 +88,25 @@ Dependency direction is **one-way**: `web → logic → core`. Never reverse.
 | Layer | Location | Allowed | Forbidden |
 |-------|----------|---------|-----------|
 | **Web** | `internal/web/v1/` | HTTP handling, JSON binding, DTO mapping, call Logic, aggregation | SQL, direct DB access, business rules |
-| **gRPC** | `internal/grpc/v1/` | gRPC transport, call Logic, map domain errors → gRPC codes | SQL, direct DB access, business rules |
 | **Logic** | `internal/logic/v1/` | Business rules, call repository interfaces, domain errors | SQL, `database.GetPool()`, `*gin.Context`, HTTP |
 | **Core** | `internal/core/` | Domain models, repository implementations, SQL, DB pool | HTTP, business orchestration |
 
-- Web **and** gRPC are sibling transports at the same level; both delegate to the **same** Logic layer and return identical data.
+- Web is the only transport; it delegates to Logic and returns domain data.
 - Use repository interfaces (defined in `core/domain/`) for data access. Constructor-injected dependencies only.
-- **Never** call Logic functions across services — use the gRPC/HTTP transport. **Never** skip Logic (Web/gRPC must not touch `core/repository` directly).
+- **Never** call Logic functions across services — use the HTTP transport. **Never** skip Logic (Web must not touch `core/repository` directly).
 
-### gRPC server (east-west transport)
+### JWT issuance (the only credential)
 
-- auth-service runs a gRPC **server** exposing `auth.v1.AuthService/GetMe` on `:9090` (`GRPC_PORT`), **alongside** HTTP `:8080`.
-- gRPC is the **official east-west transport** — **always on**, no `GRPC_ENABLED` flag, no REST fallback. Only the port is configurable; `startGRPC` returns `nil` only if it cannot bind.
-- Bootstrapped via shared `github.com/duynhlab/pkg/grpcx` (`grpcx.NewServer` wires the OTel stats handler, health, reflection).
-- `GetMe` reads the bearer token from gRPC metadata and mirrors `GET /auth/v1/private/me`. Missing/malformed/invalid/expired → `codes.Unauthenticated` (**fail closed**); other errors → `codes.Internal`.
+- `internal/core/jwt` signs RS256 access tokens (claims `iss/aud/sub/exp/iat/nbf/jti/username/email`, `kid` header = SHA-256 of the public key) and serves the JWKS.
+- `JWT_PRIVATE_KEY_PEM` empty ⇒ ephemeral dev key; **production refuses to start** without a stable key (ephemeral keys break multi-replica verification).
+- Minting is **mandatory** — a mint failure fails login/register (there is no other credential).
+- Refresh tokens: opaque 32-byte, sha256-hashed at rest, family-tracked (`refresh_tokens`), rotated atomically on refresh; reuse/lost-race revokes the family. Logout revokes the family of the presented refresh token (idempotent).
 
 ### Observability
 
 Backed by shared `github.com/duynhlab/pkg/obsx`.
 
-- `obsx.SetupMetrics()` runs in `main` **before** the gRPC bootstrap so otelgrpc handlers pick up the global MeterProvider. It bridges gRPC RED metrics (`rpc_server_*` / `rpc_client_*`) onto the **same** Prometheus registry and the **same** `/metrics` endpoint — **no separate metrics port**. Toggle via `METRICS_ENABLED`.
+- `obsx.SetupMetrics()` runs in `main`; HTTP RED metrics surface on the single `/metrics` endpoint — **no separate metrics port**. Toggle via `METRICS_ENABLED`.
 - HTTP RED metrics come from `middleware/prometheus.go` (`request_duration_seconds`, `requests_in_flight`, `request_size_bytes`, `response_size_bytes`, with trace exemplars).
 - `obsx.TraceIDFromContext` gives the logging middleware its `trace_id` for log↔trace correlation (falls back to inbound `traceparent`/`X-Trace-ID`, then a generated ID).
 - **Middleware chain order**: `tracing → logging → metrics` (registered in `setupServer`).
@@ -121,17 +119,15 @@ All diagrams **must** use Mermaid. Never ASCII art.
 ```mermaid
 flowchart LR
     Browser -->|HTTP :8080| Web[web/v1]
-    Service -->|gRPC :9090 GetMe| GRPC[grpc/v1]
+    Service -. "JWKS fetch (cached)" .-> Web
     Web --> Logic[logic/v1]
-    GRPC --> Logic
     Logic --> Core[core]
     Core -->|pgx| DB[(auth-db)]
 ```
 
 ## Gotchas
 
-- The gRPC server impl (`internal/grpc/v1`) is a **transport peer**, not a data layer — it calls Logic and maps errors to gRPC codes. **No DB access in the handler.**
-- **Graceful-shutdown order is fixed** (VictoriaMetrics pattern): `/ready` → 503 → drain delay (`READINESS_DRAIN_DELAY`, default 5s) → HTTP `Shutdown` → gRPC `GracefulStop` → DB pool `Close` → tracer `Shutdown`. Don't reorder.
+- **Graceful-shutdown order is fixed** (VictoriaMetrics pattern): `/ready` → 503 → drain delay (`READINESS_DRAIN_DELAY`, default 5s) → HTTP `Shutdown` → DB pool `Close` → tracer `Shutdown`. Don't reorder.
 - **Kyverno image rules**: deploy images must be `ghcr.io/duynhlab/auth-service/auth:<sha>` (or `:vX.Y.Z`). **Never `:latest`.**
 - Migrations run via the `migrate` subcommand (golang-migrate, embedded in the app binary; the init container reuses the app image), applying forward-only `.up.sql` files.
 - DB has a **dual connection pattern**: main container via PgBouncer (`auth-db-pooler:5432`), init/migration container direct (`auth-db:5432`) for DDL.
@@ -142,11 +138,12 @@ Routes mount directly at `/{service}/v1/{audience}/…` (Variant A — one URL s
 
 | Method | Path | Audience | Description |
 |--------|------|----------|-------------|
-| `POST` | `/auth/v1/public/login` | public | Login, returns an opaque session token |
-| `POST` | `/auth/v1/public/register` | public | Register, returns a session token |
-| `GET` | `/auth/v1/private/me` | private | Current user from `Authorization: Bearer <token>` |
-| `POST` | `/auth/v1/private/logout` | private | Revoke the caller's session token (idempotent) |
+| `POST` | `/auth/v1/public/login` | public | Login → `{access_token, refresh_token, expires_in, user}` |
+| `POST` | `/auth/v1/public/register` | public | Register → same response shape as login |
+| `POST` | `/auth/v1/public/refresh` | public | Rotate the refresh token, mint a new pair; reuse revokes the family |
+| `POST` | `/auth/v1/public/logout` | public | Body `{refresh_token}` — revoke the token family (idempotent) |
+| `GET` | `/auth/v1/public/jwks` | public | JWKS for local verification (services + Kong edge) |
 
-**gRPC** (east-west, not on the gateway): `auth.v1.AuthService/GetMe` on `:9090` — token in gRPC metadata, called by every service's auth middleware. Mirrors `GET /auth/v1/private/me`.
+Services verify JWTs locally via `pkg/authmw` (`MiddlewareJWT`) against this JWKS — no runtime call to auth-service on the hot path.
 
 Full convention + inventory: [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).

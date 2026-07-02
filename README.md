@@ -1,13 +1,13 @@
 # auth-service
 
-Authentication microservice for user login, registration, session management, and token validation. It is the platform's east-west authority: every other service validates bearer tokens by calling auth-service's gRPC `AuthService/GetMe`.
+Authentication microservice for user login, registration, and RS256 JWT issuance (RFC-0009 Phase 5: the access token is the **only** credential). Every other service verifies access tokens **locally** against the published JWKS — there is no east-west validation call to auth.
 
 ## Features
 
-- User login with opaque session tokens (bcrypt password verification)
-- User registration
-- Token validation (`GET /auth/v1/private/me` and gRPC `AuthService/GetMe`)
-- Session management (create on login/register, revoke on logout)
+- User login/registration issuing RS256 JWT access tokens (1 h TTL) + rotating refresh tokens (bcrypt password verification, constant-time user-not-found path)
+- Token refresh with rotation and reuse detection — replaying a rotated token revokes the whole token family
+- Logout by refresh token — revokes the token family server-side (idempotent); the outstanding access token simply expires
+- JWKS publication (`GET /auth/v1/public/jwks`) for local verification by services and Kong's edge `jwt` plugin
 
 ## API Endpoints
 
@@ -17,21 +17,22 @@ All HTTP routes follow Variant A naming — single path for browser and in-clust
 |--------|------|----------|
 | `POST` | `/auth/v1/public/login` | public |
 | `POST` | `/auth/v1/public/register` | public |
-| `GET` | `/auth/v1/private/me` | private |
-| `POST` | `/auth/v1/private/logout` | private |
+| `POST` | `/auth/v1/public/refresh` | public |
+| `POST` | `/auth/v1/public/logout` | public |
+| `GET` | `/auth/v1/public/jwks` | public |
 
-- Browser: `https://gateway.duynhne.me/auth/v1/…`
-- Service-to-service (JWT validation): `http://auth.auth.svc.cluster.local:8080/auth/v1/private/me`
+Auth is **public-only**: login/register/refresh return `{access_token, refresh_token, expires_in, user}`; logout takes `{refresh_token}` in the body (so an expired access token can still revoke) and revokes the family. The `/private/` prefix was removed with the opaque tokens.
 
-## gRPC (east-west transport)
+- Browser: `https://gateway.duynh.me/auth/v1/public/…`
+- In-cluster JWKS: `http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks`
 
-auth-service runs a gRPC **server** alongside the HTTP listener (dual-port). It exposes `auth.v1.AuthService/GetMe` on `:9090` (`GRPC_PORT`, default `9090`), which every other service's auth middleware calls to validate the bearer token carried in gRPC metadata. gRPC is the official east-west transport — the server always runs (no REST fallback, no enable/disable flag); only the port is configurable.
+## Token model (JWT-only)
 
-The gRPC server is wired via the shared `github.com/duynhlab/pkg/grpcx` bootstrap (OpenTelemetry stats handler, health, reflection). The transport in `internal/grpc/v1` is a thin adapter over the same logic layer used by the HTTP handlers, so both paths return identical data. A missing, malformed, invalid, or expired token yields `codes.Unauthenticated` (fail closed).
+auth-service is **HTTP-only** — the gRPC `GetMe` server was removed in RFC-0009 Phase 5. It signs RS256 access tokens (claims `iss/aud/sub/exp/iat/nbf/jti/username/email`, `kid` in the header) and publishes the matching JWKS. Services verify tokens locally via `pkg/authmw` (`MiddlewareJWT`), and Kong pre-checks them at the edge — no runtime call to auth on the hot path. Refresh tokens are opaque, sha256-hashed at rest, family-tracked, and rotated on every refresh; reuse detection revokes the family.
 
 ## Observability
 
-- **Metrics**: HTTP RED metrics (`request_duration_seconds`, `requests_in_flight`, request/response sizes) are recorded by the Prometheus middleware. `obsx.SetupMetrics()` additionally bridges gRPC RED metrics (`rpc_server_*` / `rpc_client_*`) from the otelgrpc stats handlers onto the **same** Prometheus registry and the **same** `/metrics` endpoint — no separate metrics port. The platform ServiceMonitor scrapes `/metrics`.
+- **Metrics**: HTTP RED metrics (`request_duration_seconds`, `requests_in_flight`, request/response sizes) are recorded by the Prometheus middleware on `/metrics`. The platform ServiceMonitor scrapes `/metrics`.
 - **Tracing**: OpenTelemetry traces are exported via OTLP HTTP to the OTel Collector. The middleware chain runs in order **tracing → logging → metrics**.
 - **Logging**: structured Zerolog. The logging middleware derives `trace_id` from the active OTel span (`obsx.TraceIDFromContext`) for log↔trace correlation, falling back to inbound trace headers or a generated ID.
 - **Profiling**: Pyroscope continuous profiling (`PROFILING_ENABLED`, default on).
@@ -39,7 +40,7 @@ The gRPC server is wired via the shared `github.com/duynhlab/pkg/grpcx` bootstra
 ## Tech Stack
 
 - Go + Gin framework
-- gRPC server (`AuthService/GetMe`) via shared `pkg/grpcx`
+- RS256 JWT signing + JWKS (`internal/core/jwt`), refresh-token rotation with reuse detection
 - PostgreSQL 17 (auth-db cluster, HA) via pgx/v5
 - Connection pooler (PgBouncer / transaction-mode pooler) — simple protocol, statement cache disabled
 - OpenTelemetry tracing + metrics, Zerolog logging, Pyroscope profiling
@@ -52,8 +53,10 @@ Environment-based (12-factor), loaded by `config/config.go` with validation. Sel
 |----------|---------|---------|
 | `SERVICE_NAME` | (required) | Service name (`auth`) |
 | `PORT` | `8080` | HTTP listen port |
-| `GRPC_PORT` | `9090` | gRPC listen port |
 | `ENV` | `development` | `dev`/`staging`/`production` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `https://gateway.duynh.me` / `duynhlab-platform` | Access-token `iss`/`aud` (must match Kong + authmw) |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL` | `1h` / `720h` | Token lifetimes |
+| `JWT_PRIVATE_KEY_PEM` | (empty) | RS256 signing key; empty = ephemeral dev key, **required in production** |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | Logging |
 | `METRICS_ENABLED` / `METRICS_PATH` | `true` / `/metrics` | Prometheus metrics |
 | `TRACING_ENABLED` | `true` | OpenTelemetry tracing |
