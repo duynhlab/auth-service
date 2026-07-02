@@ -68,38 +68,6 @@ func (f *fakeUserRepository) UpdateLastLogin(ctx context.Context, userID int) er
 	return nil
 }
 
-// fakeSessionRepository is a configurable in-memory test double for
-// domain.SessionRepository.
-type fakeSessionRepository struct {
-	create         func(ctx context.Context, userID int, token string, expiresAt time.Time) error
-	getUserByToken func(ctx context.Context, token string) (*domain.SessionRow, error)
-	del            func(ctx context.Context, token string) error
-
-	createCalls int
-}
-
-func (f *fakeSessionRepository) Create(ctx context.Context, userID int, token string, expiresAt time.Time) error {
-	f.createCalls++
-	if f.create != nil {
-		return f.create(ctx, userID, token, expiresAt)
-	}
-	return nil
-}
-
-func (f *fakeSessionRepository) GetUserByToken(ctx context.Context, token string) (*domain.SessionRow, error) {
-	if f.getUserByToken != nil {
-		return f.getUserByToken(ctx, token)
-	}
-	return nil, nil
-}
-
-func (f *fakeSessionRepository) Delete(ctx context.Context, token string) error {
-	if f.del != nil {
-		return f.del(ctx, token)
-	}
-	return nil
-}
-
 // fakeRefreshTokenRepository is a configurable in-memory test double for
 // domain.RefreshTokenRepository.
 type fakeRefreshTokenRepository struct {
@@ -165,25 +133,21 @@ func TestAuthService_Login(t *testing.T) {
 	tests := []struct {
 		name        string
 		users       *fakeUserRepository
-		sessions    *fakeSessionRepository
 		req         domain.LoginRequest
 		wantErr     error
 		wantUserID  string
 		wantUpdates int
-		wantSession int
 	}{
 		{
-			name: "success returns token and user",
+			name: "success returns access token and user",
 			users: &fakeUserRepository{
 				getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) {
 					return validRow, nil
 				},
 			},
-			sessions:    &fakeSessionRepository{},
 			req:         domain.LoginRequest{Username: "alice", Password: password},
 			wantUserID:  "7",
 			wantUpdates: 1,
-			wantSession: 1,
 		},
 		{
 			name: "user not found is ErrUserNotFound",
@@ -192,9 +156,8 @@ func TestAuthService_Login(t *testing.T) {
 					return nil, nil
 				},
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.LoginRequest{Username: "ghost", Password: password},
-			wantErr:  ErrUserNotFound,
+			req:     domain.LoginRequest{Username: "ghost", Password: password},
+			wantErr: ErrUserNotFound,
 		},
 		{
 			name: "repository error is propagated",
@@ -203,9 +166,8 @@ func TestAuthService_Login(t *testing.T) {
 					return nil, errRepo
 				},
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.LoginRequest{Username: "alice", Password: password},
-			wantErr:  errRepo,
+			req:     domain.LoginRequest{Username: "alice", Password: password},
+			wantErr: errRepo,
 		},
 		{
 			name: "wrong password is ErrInvalidCredentials",
@@ -214,9 +176,8 @@ func TestAuthService_Login(t *testing.T) {
 					return validRow, nil
 				},
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.LoginRequest{Username: "alice", Password: "wrong"},
-			wantErr:  ErrInvalidCredentials,
+			req:     domain.LoginRequest{Username: "alice", Password: "wrong"},
+			wantErr: ErrInvalidCredentials,
 		},
 		{
 			name: "best-effort last-login error does not fail login",
@@ -226,32 +187,15 @@ func TestAuthService_Login(t *testing.T) {
 				},
 				updateLast: func(_ context.Context, _ int) error { return errRepo },
 			},
-			sessions:    &fakeSessionRepository{},
 			req:         domain.LoginRequest{Username: "alice", Password: password},
 			wantUserID:  "7",
 			wantUpdates: 1,
-			wantSession: 1,
-		},
-		{
-			name: "best-effort session error does not fail login",
-			users: &fakeUserRepository{
-				getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) {
-					return validRow, nil
-				},
-			},
-			sessions: &fakeSessionRepository{
-				create: func(_ context.Context, _ int, _ string, _ time.Time) error { return errRepo },
-			},
-			req:         domain.LoginRequest{Username: "alice", Password: password},
-			wantUserID:  "7",
-			wantUpdates: 1,
-			wantSession: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(tt.users, tt.sessions, nil, nil, 0)
+			svc := NewAuthService(tt.users, nil, newTestSigner(t), 0)
 
 			resp, err := svc.Login(context.Background(), tt.req)
 
@@ -271,8 +215,8 @@ func TestAuthService_Login(t *testing.T) {
 			if resp == nil {
 				t.Fatal("expected response, got nil")
 			}
-			if resp.Token == "" {
-				t.Error("expected non-empty session token")
+			if resp.AccessToken == "" {
+				t.Error("expected non-empty access token")
 			}
 			if resp.User.ID != tt.wantUserID {
 				t.Errorf("user ID = %q, want %q", resp.User.ID, tt.wantUserID)
@@ -280,77 +224,55 @@ func TestAuthService_Login(t *testing.T) {
 			if tt.users.updateLastCalls != tt.wantUpdates {
 				t.Errorf("UpdateLastLogin calls = %d, want %d", tt.users.updateLastCalls, tt.wantUpdates)
 			}
-			if tt.sessions.createCalls != tt.wantSession {
-				t.Errorf("session Create calls = %d, want %d", tt.sessions.createCalls, tt.wantSession)
-			}
 		})
 	}
 }
 
 func TestAuthService_Register(t *testing.T) {
 	tests := []struct {
-		name        string
-		users       *fakeUserRepository
-		sessions    *fakeSessionRepository
-		req         domain.RegisterRequest
-		wantErr     error
-		wantUserID  string
-		wantSession int
+		name       string
+		users      *fakeUserRepository
+		req        domain.RegisterRequest
+		wantErr    error
+		wantUserID string
 	}{
 		{
-			name: "success creates user and session",
+			name: "success creates user and mints access token",
 			users: &fakeUserRepository{
 				create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
 			},
-			sessions:    &fakeSessionRepository{},
-			req:         domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
-			wantUserID:  "42",
-			wantSession: 1,
+			req:        domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
+			wantUserID: "42",
 		},
 		{
 			name: "existing user is ErrUserExists",
 			users: &fakeUserRepository{
 				existsByUOE: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
-			wantErr:  ErrUserExists,
+			req:     domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
+			wantErr: ErrUserExists,
 		},
 		{
 			name: "exists-check error is propagated",
 			users: &fakeUserRepository{
 				existsByUOE: func(_ context.Context, _, _ string) (bool, error) { return false, errRepo },
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
-			wantErr:  errRepo,
+			req:     domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
+			wantErr: errRepo,
 		},
 		{
 			name: "create error is propagated",
 			users: &fakeUserRepository{
 				create: func(_ context.Context, _, _, _ string) (int, error) { return 0, errRepo },
 			},
-			sessions: &fakeSessionRepository{},
-			req:      domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
-			wantErr:  errRepo,
-		},
-		{
-			name: "best-effort session error does not fail register",
-			users: &fakeUserRepository{
-				create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
-			},
-			sessions: &fakeSessionRepository{
-				create: func(_ context.Context, _ int, _ string, _ time.Time) error { return errRepo },
-			},
-			req:         domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
-			wantUserID:  "42",
-			wantSession: 1,
+			req:     domain.RegisterRequest{Username: "bob", Email: "bob@example.com", Password: "secret1"},
+			wantErr: errRepo,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(tt.users, tt.sessions, nil, nil, 0)
+			svc := NewAuthService(tt.users, nil, newTestSigner(t), 0)
 
 			resp, err := svc.Register(context.Background(), tt.req)
 
@@ -370,8 +292,8 @@ func TestAuthService_Register(t *testing.T) {
 			if resp == nil {
 				t.Fatal("expected response, got nil")
 			}
-			if resp.Token == "" {
-				t.Error("expected non-empty session token")
+			if resp.AccessToken == "" {
+				t.Error("expected non-empty access token")
 			}
 			if resp.User.ID != tt.wantUserID {
 				t.Errorf("user ID = %q, want %q", resp.User.ID, tt.wantUserID)
@@ -382,137 +304,102 @@ func TestAuthService_Register(t *testing.T) {
 			if tt.users.createdHash == tt.req.Password {
 				t.Error("password was stored in plaintext; expected a bcrypt hash")
 			}
-			if tt.sessions.createCalls != tt.wantSession {
-				t.Errorf("session Create calls = %d, want %d", tt.sessions.createCalls, tt.wantSession)
-			}
-		})
-	}
-}
-
-func TestAuthService_GetUserByToken(t *testing.T) {
-	tests := []struct {
-		name       string
-		sessions   *fakeSessionRepository
-		wantErr    error
-		wantUserID string
-	}{
-		{
-			name: "valid session returns user",
-			sessions: &fakeSessionRepository{
-				getUserByToken: func(_ context.Context, _ string) (*domain.SessionRow, error) {
-					return &domain.SessionRow{
-						UserID:    7,
-						Username:  "alice",
-						Email:     "alice@example.com",
-						ExpiresAt: time.Now().Add(time.Hour),
-					}, nil
-				},
-			},
-			wantUserID: "7",
-		},
-		{
-			name: "missing session is ErrSessionNotFound",
-			sessions: &fakeSessionRepository{
-				getUserByToken: func(_ context.Context, _ string) (*domain.SessionRow, error) {
-					return nil, nil
-				},
-			},
-			wantErr: ErrSessionNotFound,
-		},
-		{
-			name: "expired session is ErrSessionExpired",
-			sessions: &fakeSessionRepository{
-				getUserByToken: func(_ context.Context, _ string) (*domain.SessionRow, error) {
-					return &domain.SessionRow{
-						UserID:    7,
-						Username:  "alice",
-						Email:     "alice@example.com",
-						ExpiresAt: time.Now().Add(-time.Hour),
-					}, nil
-				},
-			},
-			wantErr: ErrSessionExpired,
-		},
-		{
-			name: "repository error is propagated",
-			sessions: &fakeSessionRepository{
-				getUserByToken: func(_ context.Context, _ string) (*domain.SessionRow, error) {
-					return nil, errRepo
-				},
-			},
-			wantErr: errRepo,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(&fakeUserRepository{}, tt.sessions, nil, nil, 0)
-
-			user, err := svc.GetUserByToken(context.Background(), "some-token")
-
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("GetUserByToken() error = %v, want wrapping %v", err, tt.wantErr)
-				}
-				if user != nil {
-					t.Errorf("expected nil user on error, got %+v", user)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if user == nil {
-				t.Fatal("expected user, got nil")
-			}
-			if user.ID != tt.wantUserID {
-				t.Errorf("user ID = %q, want %q", user.ID, tt.wantUserID)
-			}
 		})
 	}
 }
 
 func TestAuthService_Logout(t *testing.T) {
+	const family = "fam-logout"
+	row := &domain.RefreshTokenRow{
+		UserID:    7,
+		FamilyID:  family,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
 	tests := []struct {
-		name     string
-		sessions *fakeSessionRepository
-		wantErr  bool
+		name        string
+		refresh     *fakeRefreshTokenRepository
+		wantErr     error
+		wantRevoked []string
 	}{
 		{
-			name:     "successful revocation returns no error",
-			sessions: &fakeSessionRepository{},
+			name: "known token revokes its family",
+			refresh: &fakeRefreshTokenRepository{
+				getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return row, nil },
+			},
+			wantRevoked: []string{family},
 		},
 		{
-			name: "repository error is propagated",
-			sessions: &fakeSessionRepository{
-				del: func(_ context.Context, _ string) error { return errRepo },
+			name: "unknown token is idempotent success",
+			refresh: &fakeRefreshTokenRepository{
+				getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return nil, nil },
 			},
-			wantErr: true,
+			wantRevoked: nil,
+		},
+		{
+			name: "expired token still revokes its family",
+			refresh: &fakeRefreshTokenRepository{
+				getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) {
+					expired := *row
+					expired.ExpiresAt = time.Now().Add(-time.Hour)
+					return &expired, nil
+				},
+			},
+			wantRevoked: []string{family},
+		},
+		{
+			name: "lookup error is propagated",
+			refresh: &fakeRefreshTokenRepository{
+				getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return nil, errRepo },
+			},
+			wantErr: errRepo,
+		},
+		{
+			name: "revoke error is propagated",
+			refresh: &fakeRefreshTokenRepository{
+				getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return row, nil },
+				revoke:    func(_ context.Context, _ string) error { return errRepo },
+			},
+			wantErr:     errRepo,
+			wantRevoked: []string{family},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewAuthService(&fakeUserRepository{}, tt.sessions, nil, nil, 0)
+			svc := NewAuthService(&fakeUserRepository{}, tt.refresh, newTestSigner(t), time.Hour)
 
-			err := svc.Logout(context.Background(), "some-token")
+			err := svc.Logout(context.Background(), "raw-refresh-token")
 
-			if tt.wantErr {
-				if !errors.Is(err, errRepo) {
-					t.Fatalf("Logout() error = %v, want wrapping %v", err, errRepo)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Logout() error = %v, want wrapping %v", err, tt.wantErr)
 				}
-				return
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
+
+			if len(tt.refresh.revoked) != len(tt.wantRevoked) {
+				t.Fatalf("RevokeFamily calls = %v, want %v", tt.refresh.revoked, tt.wantRevoked)
+			}
+			for i := range tt.wantRevoked {
+				if tt.refresh.revoked[i] != tt.wantRevoked[i] {
+					t.Errorf("RevokeFamily[%d] = %q, want %q", i, tt.refresh.revoked[i], tt.wantRevoked[i])
+				}
 			}
 		})
 	}
+
+	t.Run("nil refresh repository is a no-op", func(t *testing.T) {
+		svc := NewAuthService(&fakeUserRepository{}, nil, newTestSigner(t), time.Hour)
+		if err := svc.Logout(context.Background(), "x"); err != nil {
+			t.Errorf("unexpected error with nil repo: %v", err)
+		}
+	})
 }
 
-func TestAuthService_DualIssueAccessToken(t *testing.T) {
-	password := "password123"
+func TestAuthService_MintMandatory(t *testing.T) {
+	const password = "password123"
 	validRow := &domain.UserRow{
 		ID:           7,
 		Username:     "alice",
@@ -520,83 +407,52 @@ func TestAuthService_DualIssueAccessToken(t *testing.T) {
 		PasswordHash: hashPassword(t, password),
 	}
 
-	t.Run("login mints access token when signer present", func(t *testing.T) {
+	t.Run("login mints access token and expiry", func(t *testing.T) {
 		users := &fakeUserRepository{
 			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, newTestSigner(t), 0)
+		svc := NewAuthService(users, nil, newTestSigner(t), 0)
 
 		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
 		if err != nil {
 			t.Fatalf("Login: %v", err)
 		}
 		if resp.AccessToken == "" {
-			t.Error("expected non-empty access token with signer present")
+			t.Error("expected non-empty access token")
 		}
 		if resp.ExpiresIn != int(time.Hour.Seconds()) {
 			t.Errorf("ExpiresIn = %d, want %d", resp.ExpiresIn, int(time.Hour.Seconds()))
 		}
-		if resp.Token == "" {
-			t.Error("opaque token must still be issued (dual-issue)")
-		}
 	})
 
-	t.Run("login leaves access token empty when signer nil", func(t *testing.T) {
+	t.Run("login fails when signer nil (access token is the only credential)", func(t *testing.T) {
 		users := &fakeUserRepository{
 			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, nil, 0)
+		svc := NewAuthService(users, nil, nil, 0)
 
-		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
-		if err != nil {
-			t.Fatalf("Login: %v", err)
-		}
-		if resp.AccessToken != "" {
-			t.Errorf("expected empty access token with nil signer, got %q", resp.AccessToken)
-		}
-		if resp.ExpiresIn != 0 {
-			t.Errorf("expected ExpiresIn 0, got %d", resp.ExpiresIn)
+		if _, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password}); err == nil {
+			t.Error("expected error with nil signer, got nil")
 		}
 	})
 
-	t.Run("register mints access token when signer present", func(t *testing.T) {
+	t.Run("register fails when signer nil", func(t *testing.T) {
 		users := &fakeUserRepository{
 			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, newTestSigner(t), 0)
+		svc := NewAuthService(users, nil, nil, 0)
 
-		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
+		if _, err := svc.Register(context.Background(), domain.RegisterRequest{
 			Username: "bob", Email: "bob@example.com", Password: "secret1",
-		})
-		if err != nil {
-			t.Fatalf("Register: %v", err)
-		}
-		if resp.AccessToken == "" {
-			t.Error("expected non-empty access token with signer present")
-		}
-	})
-
-	t.Run("register leaves access token empty when signer nil", func(t *testing.T) {
-		users := &fakeUserRepository{
-			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
-		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, nil, 0)
-
-		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
-			Username: "bob", Email: "bob@example.com", Password: "secret1",
-		})
-		if err != nil {
-			t.Fatalf("Register: %v", err)
-		}
-		if resp.AccessToken != "" {
-			t.Errorf("expected empty access token with nil signer, got %q", resp.AccessToken)
+		}); err == nil {
+			t.Error("expected error with nil signer, got nil")
 		}
 	})
 }
 
 func TestAuthService_JWKS(t *testing.T) {
 	t.Run("returns body when signer present", func(t *testing.T) {
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, nil, newTestSigner(t), 0)
+		svc := NewAuthService(&fakeUserRepository{}, nil, newTestSigner(t), 0)
 		body, err := svc.JWKS()
 		if err != nil {
 			t.Fatalf("JWKS: %v", err)
@@ -607,7 +463,7 @@ func TestAuthService_JWKS(t *testing.T) {
 	})
 
 	t.Run("errors when signer nil", func(t *testing.T) {
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, nil, nil, 0)
+		svc := NewAuthService(&fakeUserRepository{}, nil, nil, 0)
 		if _, err := svc.JWKS(); err == nil {
 			t.Error("expected error with nil signer, got nil")
 		}
@@ -628,7 +484,7 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
 		}
 		refresh := &fakeRefreshTokenRepository{}
-		svc := NewAuthService(users, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(users, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
 		if err != nil {
@@ -646,7 +502,7 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 		users := &fakeUserRepository{
 			getByUsername: func(_ context.Context, _ string) (*domain.UserRow, error) { return validRow, nil },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, newTestSigner(t), time.Hour)
+		svc := NewAuthService(users, nil, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
 		if err != nil {
@@ -664,7 +520,7 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{
 			create: func(_ context.Context, _ int, _, _ string, _ time.Time) error { return errRepo },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(users, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Login(context.Background(), domain.LoginRequest{Username: "alice", Password: password})
 		if err != nil {
@@ -673,8 +529,8 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 		if resp.RefreshToken != "" {
 			t.Errorf("expected empty refresh token on create error, got %q", resp.RefreshToken)
 		}
-		if resp.Token == "" {
-			t.Error("opaque token must still be issued")
+		if resp.AccessToken == "" {
+			t.Error("access token must still be issued")
 		}
 	})
 
@@ -683,7 +539,7 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
 		}
 		refresh := &fakeRefreshTokenRepository{}
-		svc := NewAuthService(users, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(users, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
 			Username: "bob", Email: "bob@example.com", Password: "secret1",
@@ -703,7 +559,7 @@ func TestAuthService_IssueRefreshOnLoginRegister(t *testing.T) {
 		users := &fakeUserRepository{
 			create: func(_ context.Context, _, _, _ string) (int, error) { return 42, nil },
 		}
-		svc := NewAuthService(users, &fakeSessionRepository{}, nil, newTestSigner(t), time.Hour)
+		svc := NewAuthService(users, nil, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Register(context.Background(), domain.RegisterRequest{
 			Username: "bob", Email: "bob@example.com", Password: "secret1",
@@ -734,7 +590,7 @@ func TestAuthService_Refresh(t *testing.T) {
 				return true, nil
 			},
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Refresh(context.Background(), "raw-refresh-token")
 		if err != nil {
@@ -762,7 +618,7 @@ func TestAuthService_Refresh(t *testing.T) {
 	})
 
 	t.Run("nil refresh repository fails closed without panic", func(t *testing.T) {
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, nil, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, nil, newTestSigner(t), time.Hour)
 		if _, err := svc.Refresh(context.Background(), "raw-refresh-token"); !errors.Is(err, ErrRefreshInvalid) {
 			t.Errorf("err = %v, want ErrRefreshInvalid", err)
 		}
@@ -784,7 +640,7 @@ func TestAuthService_Refresh(t *testing.T) {
 				return false, nil
 			},
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Refresh(context.Background(), "raced")
 		if !errors.Is(err, ErrRefreshReuse) {
@@ -812,7 +668,7 @@ func TestAuthService_Refresh(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{
 			getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return row, nil },
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		resp, err := svc.Refresh(context.Background(), "replayed")
 		if !errors.Is(err, ErrRefreshReuse) {
@@ -838,7 +694,7 @@ func TestAuthService_Refresh(t *testing.T) {
 			getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return row, nil },
 			revoke:    func(_ context.Context, _ string) error { return errRepo },
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		_, err := svc.Refresh(context.Background(), "replayed")
 		// A failed revoke must be loud (mapped to 500), NOT a silent 401 reuse.
@@ -862,7 +718,7 @@ func TestAuthService_Refresh(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{
 			getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return row, nil },
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		_, err := svc.Refresh(context.Background(), "expired")
 		if !errors.Is(err, ErrRefreshInvalid) {
@@ -874,7 +730,7 @@ func TestAuthService_Refresh(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{
 			getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return nil, nil },
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		_, err := svc.Refresh(context.Background(), "unknown")
 		if !errors.Is(err, ErrRefreshInvalid) {
@@ -886,7 +742,7 @@ func TestAuthService_Refresh(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{
 			getByHash: func(_ context.Context, _ string) (*domain.RefreshTokenRow, error) { return nil, errRepo },
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		_, err := svc.Refresh(context.Background(), "boom")
 		if !errors.Is(err, errRepo) {
@@ -906,7 +762,7 @@ func TestAuthService_Refresh(t *testing.T) {
 				return false, errRepo
 			},
 		}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, newTestSigner(t), time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, newTestSigner(t), time.Hour)
 
 		_, err := svc.Refresh(context.Background(), "x")
 		if !errors.Is(err, errRepo) {
@@ -923,7 +779,7 @@ func TestAuthService_Refresh(t *testing.T) {
 
 	t.Run("nil signer returns error", func(t *testing.T) {
 		refresh := &fakeRefreshTokenRepository{}
-		svc := NewAuthService(&fakeUserRepository{}, &fakeSessionRepository{}, refresh, nil, time.Hour)
+		svc := NewAuthService(&fakeUserRepository{}, refresh, nil, time.Hour)
 
 		if _, err := svc.Refresh(context.Background(), "x"); err == nil {
 			t.Error("expected error with nil signer, got nil")

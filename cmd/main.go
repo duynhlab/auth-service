@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,7 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
-	"google.golang.org/grpc"
 
 	"github.com/duynhlab/auth-service/config"
 	migrations "github.com/duynhlab/auth-service/db/migrations"
@@ -28,15 +26,12 @@ import (
 	database "github.com/duynhlab/auth-service/internal/core"
 	authjwt "github.com/duynhlab/auth-service/internal/core/jwt"
 	"github.com/duynhlab/auth-service/internal/core/repository"
-	grpcv1 "github.com/duynhlab/auth-service/internal/grpc/v1"
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
 	webv1 "github.com/duynhlab/auth-service/internal/web/v1"
 	"github.com/duynhlab/auth-service/middleware"
-	"github.com/duynhlab/pkg/grpcx"
 	"github.com/duynhlab/pkg/logger/zerolog"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
-	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
 func main() {
@@ -82,7 +77,7 @@ func main() {
 		log.Info().Msg("Tracing disabled (TRACING_ENABLED=false)")
 	}
 
-	// RS256 access-token signer (dual-issue alongside the opaque session token).
+	// RS256 access-token signer — the only credential (RFC-0009 Phase 5).
 	// Built before the observability defers below so a fatal key-config error is
 	// not flagged by gocritic's exitAfterDefer (and fails fast).
 	signer, ephemeral, err := authjwt.NewSigner(cfg.JWT.PrivateKeyPEM, cfg.JWT.Issuer, cfg.JWT.Audience, cfg.JWT.AccessTTL)
@@ -140,19 +135,15 @@ func main() {
 
 	// Wire dependencies: Core repositories -> Logic service -> Web handler
 	userRepo := repository.NewUserRepository(pool)
-	sessionRepo := repository.NewSessionRepository(pool)
 	refreshRepo := repository.NewRefreshTokenRepository(pool)
 
-	authSvc := logicv1.NewAuthService(userRepo, sessionRepo, refreshRepo, signer, cfg.JWT.RefreshTTL)
+	authSvc := logicv1.NewAuthService(userRepo, refreshRepo, signer, cfg.JWT.RefreshTTL)
 	handler := webv1.NewHandler(authSvc)
-
-	// Optional internal gRPC server (AuthService.GetMe). HTTP :8080 is unaffected.
-	grpcSrv := startGRPC(cfg, authSvc)
 
 	// Setup router and server, then run with graceful shutdown
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, handler, &isShuttingDown)
-	runGracefulShutdown(cfg, srv, grpcSrv, pool, tp, &isShuttingDown)
+	runGracefulShutdown(cfg, srv, pool, tp, &isShuttingDown)
 }
 
 // runSubcommand handles the `migrate` and `seed` subcommands. It returns true
@@ -229,32 +220,6 @@ func applySeed(cfg *config.Config) error {
 	return nil
 }
 
-// startGRPC starts the internal gRPC server on cfg.GRPC.Port, serving
-// AuthService.GetMe alongside the HTTP listener (dual-port). gRPC is the
-// official east-west transport, so it always runs; it returns nil only if the
-// listener can't bind. Uses the shared grpcx bootstrap (OpenTelemetry, health,
-// reflection).
-func startGRPC(cfg *config.Config, authSvc *logicv1.AuthService) *grpc.Server {
-	lc := net.ListenConfig{}
-	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
-	if err != nil {
-		log.Error().Err(err).Str("port", cfg.GRPC.Port).Msg("Failed to listen for gRPC")
-		return nil
-	}
-
-	grpcSrv, _ := grpcx.NewServer()
-	authv1.RegisterAuthServiceServer(grpcSrv, grpcv1.NewServer(authSvc))
-
-	go func() {
-		log.Info().Str("port", cfg.GRPC.Port).Msg("Starting gRPC server")
-		if err := grpcSrv.Serve(lis); err != nil {
-			log.Error().Err(err).Msg("gRPC server error")
-		}
-	}()
-
-	return grpcSrv
-}
-
 // setupServer creates and configures the HTTP server with all routes and middleware.
 func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
@@ -302,7 +267,6 @@ func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *ato
 func runGracefulShutdown(
 	cfg *config.Config,
 	srv *http.Server,
-	grpcSrv *grpc.Server,
 	pool *pgxpool.Pool,
 	tp interface{ Shutdown(context.Context) error },
 	isShuttingDown *atomic.Bool,
@@ -346,12 +310,6 @@ func runGracefulShutdown(
 		log.Error().Err(err).Msg("HTTP server shutdown error")
 	} else {
 		log.Info().Msg("HTTP server shutdown complete")
-	}
-
-	// 1b. Shutdown gRPC server (if enabled)
-	if grpcSrv != nil {
-		grpcSrv.GracefulStop()
-		log.Info().Msg("gRPC server shutdown complete")
 	}
 
 	// 2. Close database connection pool

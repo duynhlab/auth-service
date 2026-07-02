@@ -14,7 +14,6 @@ func clearEnv(t *testing.T) {
 		"PROFILING_ENABLED", "PYROSCOPE_ENDPOINT",
 		"LOG_LEVEL", "LOG_FORMAT",
 		"METRICS_ENABLED", "METRICS_PATH",
-		"GRPC_PORT",
 		"DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SSLMODE",
 		"DB_POOL_MAX_CONNECTIONS", "DB_POOL_MODE", "DB_POOLER_TYPE",
 		"SHUTDOWN_TIMEOUT", "READINESS_DRAIN_DELAY",
@@ -31,9 +30,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.Service.Name != defaultServiceName {
 		t.Errorf("Name = %q, want %q", c.Service.Name, defaultServiceName)
-	}
-	if c.GRPC.Port != "9090" {
-		t.Errorf("GRPC.Port = %q, want 9090", c.GRPC.Port)
 	}
 	if !c.Tracing.Enabled {
 		t.Error("Tracing.Enabled = false, want true")
@@ -56,7 +52,6 @@ func TestLoadFromEnv(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SERVICE_NAME", "auth")
 	t.Setenv("PORT", "9000")
-	t.Setenv("GRPC_PORT", "9091")
 	t.Setenv("ENV", "production")
 	t.Setenv("TRACING_ENABLED", "false")
 	t.Setenv("OTEL_SAMPLE_RATE", "0.5")
@@ -67,9 +62,6 @@ func TestLoadFromEnv(t *testing.T) {
 	c := Load()
 	if c.Service.Name != "auth" || c.Service.Port != "9000" || c.Service.Env != "production" {
 		t.Errorf("service = %+v", c.Service)
-	}
-	if c.GRPC.Port != "9091" {
-		t.Errorf("GRPC.Port = %q, want 9091", c.GRPC.Port)
 	}
 	if c.Tracing.Enabled {
 		t.Error("Tracing.Enabled = true, want false")

@@ -1,8 +1,8 @@
 // Package jwt mints RS256 access JWTs and serves the matching JWKS.
 //
-// It runs ALONGSIDE the existing opaque session token (dual-issue): the opaque
-// token remains the authoritative east-west credential (validated via
-// auth.GetMe), while the signed JWT is an additive, self-contained access token.
+// The signed access token is the ONLY credential (RFC-0009 Phase 5): services
+// verify it locally against the published JWKS, and Kong pre-checks it at the
+// edge. The legacy opaque session token was removed.
 package jwt
 
 import (

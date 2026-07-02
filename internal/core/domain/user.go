@@ -22,9 +22,15 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"` // nolint:gosec // G117: opaque refresh token, not a password
 }
 
+// LogoutRequest revokes the presented refresh token's whole family.
+type LogoutRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"` // nolint:gosec // G117: opaque refresh token, not a password
+}
+
+// AuthResponse carries the RS256 access token (the only credential — RFC-0009
+// Phase 5 removed the opaque session token) plus the rotating refresh token.
 type AuthResponse struct {
-	Token        string `json:"token"`
-	AccessToken  string `json:"access_token,omitempty"`
+	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresIn    int    `json:"expires_in,omitempty"`
 	User         User   `json:"user"`

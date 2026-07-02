@@ -38,16 +38,6 @@ func mustGenerateDummyHash() []byte {
 	return h
 }
 
-// newSessionToken returns a cryptographically-random opaque session token.
-// It reads 32 bytes from crypto/rand and base64.RawURLEncoding-encodes them.
-func newSessionToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate session token: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
 // hashToken returns the sha256 hex digest of an opaque token. Only the hash is
 // persisted, so a database leak cannot reveal usable refresh tokens.
 func hashToken(raw string) string {
@@ -57,7 +47,7 @@ func hashToken(raw string) string {
 
 // newRefreshToken returns a cryptographically-random opaque refresh token
 // alongside its sha256 hex hash. It reads 32 bytes from crypto/rand and
-// base64.RawURLEncoding-encodes them (like newSessionToken).
+// base64.RawURLEncoding-encodes them.
 func newRefreshToken() (raw, hash string, err error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -72,26 +62,23 @@ func newRefreshToken() (raw, hash string, err error) {
 // MUST NOT access the database or SQL directly.
 type AuthService struct {
 	users         domain.UserRepository
-	sessions      domain.SessionRepository
 	refreshTokens domain.RefreshTokenRepository
 	signer        *authjwt.Signer
 	refreshTTL    time.Duration
 }
 
 // NewAuthService creates a new AuthService with the given repository
-// dependencies. signer may be nil, in which case no signed access token is
-// minted (the opaque session token is still issued). refreshTokens may be nil,
-// in which case no refresh token is issued (opaque + access still returned).
+// dependencies. signer is required — RS256 access tokens are the only
+// credential (RFC-0009 Phase 5), so login/register fail without one.
+// refreshTokens may be nil, in which case no refresh token is issued.
 func NewAuthService(
 	users domain.UserRepository,
-	sessions domain.SessionRepository,
 	refreshTokens domain.RefreshTokenRepository,
 	signer *authjwt.Signer,
 	refreshTTL time.Duration,
 ) *AuthService {
 	return &AuthService{
 		users:         users,
-		sessions:      sessions,
 		refreshTokens: refreshTokens,
 		signer:        signer,
 		refreshTTL:    refreshTTL,
@@ -163,19 +150,6 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 		span.RecordError(fmt.Errorf("update last_login: %w", updateErr))
 	}
 
-	// Create an opaque, cryptographically-random session token
-	token, err := newSessionToken()
-	if err != nil {
-		span.RecordError(err)
-		return nil, err
-	}
-
-	// Persist session (best-effort, don't fail login)
-	expiresAt := time.Now().Add(24 * time.Hour)
-	if sessErr := s.sessions.Create(ctx, row.ID, token, expiresAt); sessErr != nil {
-		span.RecordError(fmt.Errorf("create session: %w", sessErr))
-	}
-
 	user := domain.User{
 		ID:       strconv.Itoa(row.ID),
 		Username: row.Username,
@@ -183,13 +157,14 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 	}
 
 	response := &domain.AuthResponse{
-		Token: token,
-		User:  user,
+		User: user,
 	}
 
-	// Dual-issue: mint a signed RS256 access token alongside the opaque token.
-	// Best-effort — a mint failure must not fail the login.
-	s.mintAccessToken(span, response)
+	// Mint the signed RS256 access token — the only credential (RFC-0009
+	// Phase 5), so a mint failure fails the login.
+	if err := s.mintAccessToken(span, response); err != nil {
+		return nil, err
+	}
 
 	// Issue a rotating refresh token in a fresh family. Best-effort — a refresh
 	// failure must not fail the login.
@@ -204,20 +179,25 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 	return response, nil
 }
 
-// mintAccessToken adds a signed RS256 access token to response when a signer is
-// configured. It is best-effort: on error it records the span error and leaves
-// the opaque token untouched.
-func (s *AuthService) mintAccessToken(span trace.Span, response *domain.AuthResponse) {
+// mintAccessToken adds a signed RS256 access token to response. The access
+// token is the only credential (RFC-0009 Phase 5), so a missing signer or a
+// mint failure is an error — login/register must fail rather than return a
+// response the caller cannot authenticate with.
+func (s *AuthService) mintAccessToken(span trace.Span, response *domain.AuthResponse) error {
 	if s.signer == nil {
-		return
+		err := errors.New("mint access token: no signer configured")
+		span.RecordError(err)
+		return err
 	}
 	access, expiresIn, err := s.signer.MintAccess(response.User.ID, response.User.Username, response.User.Email)
 	if err != nil {
-		span.RecordError(fmt.Errorf("mint access token: %w", err))
-		return
+		err = fmt.Errorf("mint access token: %w", err)
+		span.RecordError(err)
+		return err
 	}
 	response.AccessToken = access
 	response.ExpiresIn = expiresIn
+	return nil
 }
 
 // Register handles user registration business logic.
@@ -254,19 +234,6 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
 
-	// Create an opaque, cryptographically-random session token
-	token, err := newSessionToken()
-	if err != nil {
-		span.RecordError(err)
-		return nil, err
-	}
-
-	// Persist session (best-effort)
-	expiresAt := time.Now().Add(24 * time.Hour)
-	if sessErr := s.sessions.Create(ctx, userID, token, expiresAt); sessErr != nil {
-		span.RecordError(fmt.Errorf("create session: %w", sessErr))
-	}
-
 	user := domain.User{
 		ID:       strconv.Itoa(userID),
 		Username: req.Username,
@@ -274,12 +241,15 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	}
 
 	response := &domain.AuthResponse{
-		Token: token,
-		User:  user,
+		User: user,
 	}
 
-	// Dual-issue: mint a signed RS256 access token alongside the opaque token.
-	s.mintAccessToken(span, response)
+	// Mint the signed RS256 access token — the only credential, so a mint
+	// failure fails the registration response (the user row already exists;
+	// the client can log in once the signer recovers).
+	if err := s.mintAccessToken(span, response); err != nil {
+		return nil, err
+	}
 
 	// Issue a rotating refresh token in a fresh family. Best-effort.
 	s.issueRefreshBestEffort(ctx, span, response, userID)
@@ -404,55 +374,34 @@ func (s *AuthService) JWKS() ([]byte, error) {
 	return s.signer.JWKS()
 }
 
-// GetUserByToken retrieves user info from a session token (for /auth/me endpoint).
-func (s *AuthService) GetUserByToken(ctx context.Context, token string) (*domain.User, error) {
-	ctx, span := middleware.StartSpan(ctx, "auth.get_user_by_token", trace.WithAttributes(
-		attribute.String("layer", "logic"),
-	))
-	defer span.End()
-
-	row, err := s.sessions.GetUserByToken(ctx, token)
-	if err != nil {
-		span.RecordError(err)
-		return nil, fmt.Errorf("query session: %w", err)
-	}
-	if row == nil {
-		span.SetAttributes(attribute.Bool("session.valid", false))
-		return nil, fmt.Errorf("lookup session: %w", ErrSessionNotFound)
-	}
-
-	// Check if session has expired
-	if time.Now().After(row.ExpiresAt) {
-		span.SetAttributes(attribute.Bool("session.valid", false))
-		return nil, fmt.Errorf("session expired at %v: %w", row.ExpiresAt, ErrSessionExpired)
-	}
-
-	user := &domain.User{
-		ID:       strconv.Itoa(row.UserID),
-		Username: row.Username,
-		Email:    row.Email,
-	}
-
-	span.SetAttributes(
-		attribute.String("user.id", user.ID),
-		attribute.Bool("session.valid", true),
-	)
-
-	return user, nil
-}
-
-// Logout revokes the session for the given opaque token. Idempotent: revoking a
-// token that no longer exists is not an error.
-func (s *AuthService) Logout(ctx context.Context, token string) error {
+// Logout revokes the refresh-token family of the presented refresh token, so
+// no new access tokens can be minted from it (the outstanding access token
+// simply expires — JWTs are stateless). Idempotent: an unknown or already
+// revoked token is not an error, and an expired token still revokes its family.
+func (s *AuthService) Logout(ctx context.Context, rawRefreshToken string) error {
 	ctx, span := middleware.StartSpan(ctx, "auth.logout", trace.WithAttributes(
 		attribute.String("layer", "logic"),
 	))
 	defer span.End()
 
-	if err := s.sessions.Delete(ctx, token); err != nil {
-		span.RecordError(err)
-		return fmt.Errorf("revoke session: %w", err)
+	if s.refreshTokens == nil {
+		return nil
 	}
-	span.AddEvent("session.revoked")
+
+	row, err := s.refreshTokens.GetByHash(ctx, hashToken(rawRefreshToken))
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("query refresh token: %w", err)
+	}
+	if row == nil {
+		span.AddEvent("logout.unknown_token")
+		return nil
+	}
+
+	if err := s.refreshTokens.RevokeFamily(ctx, row.FamilyID); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("revoke refresh family %q: %w", row.FamilyID, err)
+	}
+	span.AddEvent("refresh.family_revoked")
 	return nil
 }

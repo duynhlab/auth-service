@@ -180,69 +180,6 @@ func TestUserRepository_Integration(t *testing.T) {
 	})
 }
 
-func TestSessionRepository_Integration(t *testing.T) {
-	pool := newTestDB(t)
-	repo := NewSessionRepository(pool)
-	ctx := context.Background()
-
-	t.Run("GetUserByToken resolves an inserted session", func(t *testing.T) {
-		var uid int
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO users(username, email, password_hash) VALUES('sessuser','sessuser@example.com','h') RETURNING id`,
-		).Scan(&uid); err != nil {
-			t.Fatalf("insert user: %v", err)
-		}
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO sessions(user_id, token, expires_at) VALUES($1, $2, now() + interval '1 hour')`,
-			uid, "sess-token-integration",
-		); err != nil {
-			t.Fatalf("insert session: %v", err)
-		}
-		row, err := repo.GetUserByToken(ctx, "sess-token-integration")
-		if err != nil {
-			t.Fatalf("GetUserByToken: %v", err)
-		}
-		if row == nil || row.UserID != uid || row.Username != "sessuser" {
-			t.Errorf("row = %+v, want sessuser (user %d)", row, uid)
-		}
-	})
-
-	t.Run("GetUserByToken returns nil,nil for unknown token", func(t *testing.T) {
-		row, err := repo.GetUserByToken(ctx, "does-not-exist")
-		if err != nil {
-			t.Fatalf("GetUserByToken(absent): %v", err)
-		}
-		if row != nil {
-			t.Errorf("row = %+v, want nil", row)
-		}
-	})
-
-	t.Run("Create then Delete is idempotent", func(t *testing.T) {
-		const token = "integration-token"
-		if err := repo.Create(ctx, 2, token, time.Now().Add(time.Hour)); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		row, err := repo.GetUserByToken(ctx, token)
-		if err != nil || row == nil || row.UserID != 2 {
-			t.Fatalf("GetUserByToken after create: row=%+v err=%v", row, err)
-		}
-		if err := repo.Delete(ctx, token); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-		row, err = repo.GetUserByToken(ctx, token)
-		if err != nil {
-			t.Fatalf("GetUserByToken after delete: %v", err)
-		}
-		if row != nil {
-			t.Errorf("row = %+v after delete, want nil", row)
-		}
-		// Deleting an already-deleted token is a no-op.
-		if err := repo.Delete(ctx, token); err != nil {
-			t.Errorf("second Delete: %v", err)
-		}
-	})
-}
-
 func TestRefreshTokenRepository_Integration(t *testing.T) {
 	pool := newTestDB(t)
 	repo := NewRefreshTokenRepository(pool)
