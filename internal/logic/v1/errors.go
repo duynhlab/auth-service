@@ -56,14 +56,6 @@ var (
 	// HTTP Status: 409 Conflict
 	ErrUserExists = errors.New("user already exists")
 
-	// ErrSessionNotFound indicates the session token does not exist.
-	// HTTP Status: 401 Unauthorized
-	ErrSessionNotFound = errors.New("session not found")
-
-	// ErrSessionExpired indicates the session token has expired.
-	// HTTP Status: 401 Unauthorized
-	ErrSessionExpired = errors.New("session expired")
-
 	// ErrRefreshInvalid indicates the refresh token is unknown, expired, or
 	// otherwise not usable. HTTP Status: 401 Unauthorized.
 	ErrRefreshInvalid = errors.New("refresh token invalid")

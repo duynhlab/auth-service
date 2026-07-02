@@ -42,8 +42,7 @@ type Config struct {
 	Logging         LoggingConfig   // Structured logging (Zap)
 	Metrics         MetricsConfig   // Prometheus metrics
 	Database        DatabaseConfig  // PostgreSQL database configuration
-	GRPC            GRPCConfig      // Internal gRPC server (east-west /me validation)
-	JWT             JWTConfig       // RS256 access-token signing (dual-issue alongside opaque token)
+	JWT             JWTConfig       // RS256 access-token signing (the only credential)
 	ShutdownTimeout int             // Graceful shutdown timeout in seconds - from SHUTDOWN_TIMEOUT env (default: 10)
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
@@ -51,19 +50,10 @@ type Config struct {
 	ReadinessDrainDelay int
 }
 
-// GRPCConfig defines the internal gRPC server. HTTP :8080 is unaffected; the
-// gRPC listener is additive and serves AuthService.GetMe for east-west token
-// validation (every service validates here on each authenticated request).
-// gRPC is the official east-west transport — the server always runs; only the
-// port is configurable.
-type GRPCConfig struct {
-	Port string // gRPC listen port - from GRPC_PORT env (default: "9090")
-}
-
-// JWTConfig defines RS256 access-token signing. This is additive: a signed JWT
-// is minted alongside the opaque session token (dual-issue). The feature is
-// optional — if PrivateKeyPEM is empty, an ephemeral key is generated at
-// startup (suitable for local/dev, not production).
+// JWTConfig defines RS256 access-token signing — the only credential (RFC-0009
+// Phase 5). If PrivateKeyPEM is empty, an ephemeral key is generated at
+// startup for local/dev convenience; production refuses to start without a
+// stable key (see main.go).
 type JWTConfig struct {
 	Issuer     string        // Token issuer (iss) - from JWT_ISSUER env
 	Audience   string        // Token audience (aud) - from JWT_AUDIENCE env
@@ -169,9 +159,6 @@ func Load() *Config {
 		Metrics: MetricsConfig{
 			Enabled: getEnvBool("METRICS_ENABLED", true),
 			Path:    getEnv("METRICS_PATH", "/metrics"),
-		},
-		GRPC: GRPCConfig{
-			Port: getEnv("GRPC_PORT", "9090"),
 		},
 		JWT: JWTConfig{
 			Issuer:        getEnv("JWT_ISSUER", "https://gateway.duynh.me"),

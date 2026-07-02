@@ -38,8 +38,9 @@ func (h *Handler) RegisterRoutes(r gin.IRouter) {
 	r.POST("/auth/v1/public/register", h.Register)
 	r.POST("/auth/v1/public/refresh", h.Refresh)
 	r.GET("/auth/v1/public/jwks", h.JWKS)
-	r.GET("/auth/v1/private/me", h.GetMe)
-	r.POST("/auth/v1/private/logout", h.Logout)
+	// Logout is public (like refresh): it authenticates by the refresh token in
+	// the body, so a client with an expired access token can still revoke.
+	r.POST("/auth/v1/public/logout", h.Logout)
 }
 
 // JWKS serves the JSON Web Key Set for verifying signed access tokens.
@@ -55,8 +56,11 @@ func (h *Handler) JWKS(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", body)
 }
 
-// Logout revokes the caller's session token. Idempotent — returns 200 on a
-// well-formed request so clients can safely clear local state.
+// Logout revokes the presented refresh token's whole family, ending the
+// session server-side (the outstanding access token simply expires — JWTs are
+// stateless). Idempotent — an unknown or already-revoked token still returns
+// 200 so clients can safely clear local state.
+// POST /auth/v1/public/logout  Body: {"refresh_token": "..."}
 func (h *Handler) Logout(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
@@ -67,22 +71,23 @@ func (h *Handler) Logout(c *gin.Context) {
 
 	logger := pkgzerolog.FromContext(ctx)
 
-	authHeader := c.GetHeader("Authorization")
-	const bearerPrefix = "Bearer "
-	if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
-		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid authorization format")
+	var req domain.LogoutRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		span.SetAttributes(attribute.Bool("request.valid", false))
+		span.RecordError(err)
+		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
-	token := authHeader[len(bearerPrefix):]
 
-	if err := h.auth.Logout(ctx, token); err != nil {
+	if err := h.auth.Logout(ctx, req.RefreshToken); err != nil {
 		span.RecordError(err)
 		logger.Error().Err(err).Msg("Logout failed")
 		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return
 	}
 
-	logger.Info().Msg("Session revoked")
+	logger.Info().Msg("Refresh family revoked")
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
@@ -219,55 +224,3 @@ func (h *Handler) Refresh(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// GetMe handles HTTP request to get current user from session token.
-// GET /auth/v1/private/me
-// Authorization: Bearer <token>
-func (h *Handler) GetMe(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
-
-	logger := pkgzerolog.FromContext(ctx)
-
-	// Extract token from Authorization header
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
-		span.SetAttributes(attribute.Bool("auth.present", false))
-		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Authorization header required")
-		return
-	}
-
-	// Expect "Bearer <token>"
-	const bearerPrefix = "Bearer "
-	if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
-		span.SetAttributes(attribute.Bool("auth.valid_format", false))
-		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid authorization format")
-		return
-	}
-	token := authHeader[len(bearerPrefix):]
-
-	span.SetAttributes(attribute.Bool("auth.present", true))
-
-	// Lookup user by token
-	user, err := h.auth.GetUserByToken(ctx, token)
-	if err != nil {
-		span.RecordError(err)
-		logger.Warn().Err(err).Msg("Token lookup failed")
-
-		switch {
-		case errors.Is(err, logicv1.ErrSessionNotFound):
-			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Invalid or expired token")
-		case errors.Is(err, logicv1.ErrSessionExpired):
-			httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Session expired")
-		default:
-			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
-		}
-		return
-	}
-
-	logger.Info().Str("user_id", user.ID).Msg("Token validated")
-	c.JSON(http.StatusOK, user)
-}
