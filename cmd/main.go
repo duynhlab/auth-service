@@ -96,9 +96,8 @@ func main() {
 		log.Info().Str("kid", signer.Kid()).Msg("JWT signer initialized")
 	}
 
-	// Initialize metrics: bridge gRPC OTel metrics onto the Prometheus /metrics
-	// endpoint. Must run before grpcx.NewServer/Dial so the otelgrpc handlers
-	// pick up the global MeterProvider.
+	// Initialize metrics: install the global OTel MeterProvider bridged onto the
+	// Prometheus /metrics endpoint.
 	if cfg.Metrics.Enabled {
 		shutdownMetrics, err := obsx.SetupMetrics()
 		if err != nil {
