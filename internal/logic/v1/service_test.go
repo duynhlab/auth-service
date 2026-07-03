@@ -1,9 +1,11 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/duynhlab/auth-service/internal/core/domain"
@@ -784,5 +786,29 @@ func TestAuthService_Refresh(t *testing.T) {
 		if _, err := svc.Refresh(context.Background(), "x"); err == nil {
 			t.Error("expected error with nil signer, got nil")
 		}
+	})
+}
+
+func TestMustGenerateDummyHash(t *testing.T) {
+	t.Run("produces a valid bcrypt hash from random input", func(t *testing.T) {
+		input := bytes.Repeat([]byte{0xA5}, 32)
+		h := mustGenerateDummyHash(bytes.NewReader(input))
+		// The hash must verify against the exact input bytes...
+		if err := bcrypt.CompareHashAndPassword(h, input); err != nil {
+			t.Errorf("hash does not verify against its input: %v", err)
+		}
+		// ...and never against an arbitrary password guess.
+		if err := bcrypt.CompareHashAndPassword(h, []byte("password123")); err == nil {
+			t.Error("dummy hash unexpectedly matches a real-looking password")
+		}
+	})
+
+	t.Run("panics when the random source fails", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected panic on reader failure")
+			}
+		}()
+		mustGenerateDummyHash(iotest.ErrReader(errors.New("entropy exhausted")))
 	})
 }

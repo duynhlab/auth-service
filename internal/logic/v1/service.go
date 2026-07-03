@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"time"
 
@@ -26,12 +27,19 @@ const attrRefreshValid = "refresh.valid"
 // dummyHash is a bcrypt hash generated at startup — NOT a real credential. It
 // equalizes Login response timing on the user-not-found path so authentication
 // does not leak whether a username exists (CompareHashAndPassword runs in both
-// branches). It is generated rather than hardcoded so no hash literal ships in
-// the source; the input string is a throwaway placeholder, never a password.
-var dummyHash = mustGenerateDummyHash()
+// branches). The input is fresh random bytes on every start: no literal ships
+// in the source (nothing for secret scanners to flag) and the hash can never
+// correspond to a guessable password.
+var dummyHash = mustGenerateDummyHash(rand.Reader)
 
-func mustGenerateDummyHash() []byte {
-	h, err := bcrypt.GenerateFromPassword([]byte("not-a-password-placeholder"), bcrypt.DefaultCost)
+// mustGenerateDummyHash bcrypt-hashes 32 random bytes from r. It takes the
+// reader as a parameter so tests can exercise the failure path.
+func mustGenerateDummyHash(r io.Reader) []byte {
+	input := make([]byte, 32)
+	if _, err := io.ReadFull(r, input); err != nil {
+		panic("generate dummy bcrypt input: " + err.Error())
+	}
+	h, err := bcrypt.GenerateFromPassword(input, bcrypt.DefaultCost)
 	if err != nil {
 		panic("generate dummy bcrypt hash: " + err.Error())
 	}
