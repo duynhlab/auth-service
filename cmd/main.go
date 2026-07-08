@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
 
 	"github.com/duynhlab/auth-service/config"
 	migrations "github.com/duynhlab/auth-service/db/migrations"
@@ -60,23 +61,6 @@ func main() {
 		Str("port", cfg.Service.Port).
 		Msg("Service starting")
 
-	// Initialize OpenTelemetry tracing
-	var tp interface{ Shutdown(context.Context) error }
-	var err error
-	if cfg.Tracing.Enabled {
-		tp, err = middleware.InitTracing(cfg)
-		if err != nil {
-			log.Warn().Err(err).Msg("Failed to initialize tracing")
-		} else {
-			log.Info().
-				Str("endpoint", cfg.Tracing.Endpoint).
-				Float64("sample_rate", cfg.Tracing.SampleRate).
-				Msg("Tracing initialized")
-		}
-	} else {
-		log.Info().Msg("Tracing disabled (TRACING_ENABLED=false)")
-	}
-
 	// RS256 access-token signer — the only credential (RFC-0009 Phase 5).
 	// Built before the observability defers below so a fatal key-config error is
 	// not flagged by gocritic's exitAfterDefer (and fails fast).
@@ -96,8 +80,12 @@ func main() {
 		log.Info().Str("kid", signer.Kid()).Msg("JWT signer initialized")
 	}
 
-	// Initialize metrics: install the global OTel MeterProvider bridged onto the
-	// Prometheus /metrics endpoint.
+	// Initialize the OTel→Prometheus bridge FIRST (otelgrpc/otelgin metrics on
+	// the scraped /metrics endpoint — the flag-off status quo). When
+	// OTEL_METRICS_ENABLED=true, SetupObservability below installs the OTLP
+	// MeterProvider as the global AFTER this, deliberately superseding the
+	// bridge (RFC-0014 dual-emit: client_golang scrape stays untouched either
+	// way; only the OTel-instrumented metrics switch transport).
 	if cfg.Metrics.Enabled {
 		shutdownMetrics, err := obsx.SetupMetrics()
 		if err != nil {
@@ -106,6 +94,34 @@ func main() {
 			log.Info().Msg("Metrics initialized (gRPC RED metrics on /metrics)")
 			defer func() { _ = shutdownMetrics(context.Background()) }()
 		}
+	}
+
+	// RFC-0014: single OTel wiring point — traces per TRACING_ENABLED, OTLP
+	// metrics/logs behind OTEL_METRICS_ENABLED/OTEL_LOGS_ENABLED (default off).
+	// The config is built once so the tracer scope name and the startup log
+	// reflect the values obsx actually uses.
+	otelCfg := obsx.ConfigFromEnv()
+	middleware.SetServiceName(otelCfg.ServiceName)
+	var tp interface{ Shutdown(context.Context) error }
+	obs, err := obsx.SetupObservability(context.Background(), otelCfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to initialize OpenTelemetry")
+	} else {
+		tp = obs
+		if obs.TracerProvider != nil && cfg.Profiling.Enabled {
+			// Preserve traces→profiles correlation: spans carry
+			// pyroscope.profile.id when the wrapped provider is global.
+			// (pkg v0.16.1 absorbs this wrap via Config.ProfilingEnabled —
+			// drop this block on the next pkg bump.)
+			otel.SetTracerProvider(obsx.TracerProviderWithProfiles(obs.TracerProvider))
+		}
+		log.Info().
+			Bool("traces", obs.TracerProvider != nil).
+			Bool("otlp_metrics", obs.MeterProvider != nil).
+			Bool("otlp_logs", obs.LoggerProvider != nil).
+			Str("endpoint", otelCfg.Endpoint).
+			Float64("sample_rate", otelCfg.SampleRate).
+			Msg("OpenTelemetry initialized")
 	}
 
 	// Initialize Pyroscope profiling
@@ -262,7 +278,7 @@ func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *ato
 }
 
 // runGracefulShutdown starts the server and handles graceful shutdown.
-// Shutdown sequence (VictoriaMetrics pattern): /ready → 503 → drain delay → HTTP → Database → Tracer.
+// Shutdown sequence (VictoriaMetrics pattern): /ready → 503 → drain delay → HTTP → Database → OTel SDK.
 func runGracefulShutdown(
 	cfg *config.Config,
 	srv *http.Server,
@@ -317,12 +333,13 @@ func runGracefulShutdown(
 		log.Info().Msg("Database connection pool closed")
 	}
 
-	// 3. Shutdown tracer
+	// 3. Shutdown the OTel SDK — flushes pending spans plus any OTLP
+	// metrics/logs providers built behind the RFC-0014 flags.
 	if tp != nil {
 		if err := tp.Shutdown(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("Tracer shutdown error")
+			log.Error().Err(err).Msg("OpenTelemetry shutdown error")
 		} else {
-			log.Info().Msg("Tracer shutdown complete")
+			log.Info().Msg("OpenTelemetry shutdown complete")
 		}
 	}
 
