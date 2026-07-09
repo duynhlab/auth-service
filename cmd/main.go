@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/duynhlab/auth-service/config"
@@ -79,24 +78,9 @@ func main() {
 		log.Info().Str("kid", signer.Kid()).Msg("JWT signer initialized")
 	}
 
-	// Initialize the OTel→Prometheus bridge FIRST (otelgrpc/otelgin metrics on
-	// the scraped /metrics endpoint — the flag-off status quo). When
-	// OTEL_METRICS_ENABLED=true, SetupObservability below installs the OTLP
-	// MeterProvider as the global AFTER this, deliberately superseding the
-	// bridge (RFC-0014 dual-emit: client_golang scrape stays untouched either
-	// way; only the OTel-instrumented metrics switch transport).
-	if cfg.Metrics.Enabled {
-		shutdownMetrics, err := obsx.SetupMetrics()
-		if err != nil {
-			log.Warn().Err(err).Msg("Failed to initialize metrics")
-		} else {
-			log.Info().Msg("Metrics initialized (gRPC RED metrics on /metrics)")
-			defer func() { _ = shutdownMetrics(context.Background()) }()
-		}
-	}
-
 	// RFC-0014: single OTel wiring point — traces per TRACING_ENABLED, OTLP
-	// metrics/logs behind OTEL_METRICS_ENABLED/OTEL_LOGS_ENABLED (default off).
+	// metrics (the only pipeline since the P3 cutover; OTEL_METRICS_ENABLED
+	// defaults on, =false is a kill switch), logs behind OTEL_LOGS_ENABLED.
 	// The config is built once so the tracer scope name and the startup log
 	// reflect the values obsx actually uses.
 	otelCfg := obsx.ConfigFromEnv()
@@ -237,9 +221,6 @@ func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *ato
 	// Logging middleware
 	r.Use(middleware.LoggingMiddleware())
 
-	// Prometheus middleware
-	r.Use(middleware.PrometheusMiddleware())
-
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -254,9 +235,6 @@ func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *ato
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-
-	// Metrics endpoint
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Auth v1 routes — Variant A edge naming (see api-naming-convention.md)
 	handler.RegisterRoutes(r)
