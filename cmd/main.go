@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/duynhlab/auth-service/config"
 	migrations "github.com/duynhlab/auth-service/db/migrations"
@@ -95,6 +96,17 @@ func main() {
 		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
 	} else {
 		tp = obs
+		// RFC-0014 P4: tee application logs into the OTLP pipeline. ZapCore
+		// returns a NopCore when OTEL_LOGS_ENABLED is off, so the tee is
+		// unconditional; the min level mirrors the stdout core so debug
+		// lines never leave the pod on an info-level service.
+		minLevel, err := zapcore.ParseLevel(os.Getenv("LOG_LEVEL"))
+		if err != nil {
+			minLevel = zapcore.InfoLevel
+		}
+		logger = logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+			return zapcore.NewTee(c, obs.ZapCore(otelCfg.ServiceName, minLevel))
+		}))
 		logger.Info("OpenTelemetry initialized",
 			zap.Bool("traces", obs.TracerProvider != nil),
 			zap.Bool("otlp_metrics", obs.MeterProvider != nil),
