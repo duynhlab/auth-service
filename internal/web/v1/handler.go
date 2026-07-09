@@ -8,10 +8,11 @@ import (
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
 	"github.com/duynhlab/auth-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
-	pkgzerolog "github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 )
 
 // msgInvalidRequestBody is the 400 response body for malformed request JSON.
@@ -69,25 +70,25 @@ func (h *Handler) Logout(c *gin.Context) {
 	))
 	defer span.End()
 
-	logger := pkgzerolog.FromContext(ctx)
+	logger := zapx.FromContext(ctx)
 
 	var req domain.LogoutRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		logger.Error(logMsgInvalidRequest, zap.Error(err))
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
 
 	if err := h.auth.Logout(ctx, req.RefreshToken); err != nil {
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Logout failed")
+		logger.Error("Logout failed", zap.Error(err))
 		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return
 	}
 
-	logger.Info().Msg("Refresh family revoked")
+	logger.Info("Refresh family revoked")
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
@@ -100,13 +101,13 @@ func (h *Handler) Login(c *gin.Context) {
 	))
 	defer span.End()
 
-	logger := pkgzerolog.FromContext(ctx)
+	logger := zapx.FromContext(ctx)
 
 	var req domain.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		logger.Error(logMsgInvalidRequest, zap.Error(err))
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
@@ -117,7 +118,7 @@ func (h *Handler) Login(c *gin.Context) {
 	response, err := h.auth.Login(ctx, req)
 	if err != nil {
 		span.RecordError(err)
-		logger.Error().Err(err).Msg("Login failed")
+		logger.Error("Login failed", zap.Error(err))
 
 		switch {
 		case errors.Is(err, logicv1.ErrInvalidCredentials):
@@ -135,7 +136,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	logger.Info().Str("user_id", response.User.ID).Msg("Login successful")
+	logger.Info("Login successful", zap.String("user_id", response.User.ID))
 	c.JSON(http.StatusOK, response)
 }
 
@@ -148,13 +149,13 @@ func (h *Handler) Register(c *gin.Context) {
 	))
 	defer span.End()
 
-	logger := pkgzerolog.FromContext(ctx)
+	logger := zapx.FromContext(ctx)
 
 	var req domain.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		logger.Error(logMsgInvalidRequest, zap.Error(err))
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
@@ -165,10 +166,10 @@ func (h *Handler) Register(c *gin.Context) {
 	response, err := h.auth.Register(ctx, req)
 	if err != nil {
 		span.RecordError(err)
-		logger.Error().
-			Err(err).
-			Str("username", req.Username).
-			Msg("Registration failed")
+		logger.Error("Registration failed",
+			zap.Error(err),
+			zap.String("username", req.Username),
+		)
 
 		switch {
 		case errors.Is(err, logicv1.ErrUserExists):
@@ -179,7 +180,7 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	logger.Info().Str("user_id", response.User.ID).Msg("Registration successful")
+	logger.Info("Registration successful", zap.String("user_id", response.User.ID))
 	c.JSON(http.StatusCreated, response)
 }
 
@@ -193,13 +194,13 @@ func (h *Handler) Refresh(c *gin.Context) {
 	))
 	defer span.End()
 
-	logger := pkgzerolog.FromContext(ctx)
+	logger := zapx.FromContext(ctx)
 
 	var req domain.RefreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
-		logger.Error().Err(err).Msg(logMsgInvalidRequest)
+		logger.Error(logMsgInvalidRequest, zap.Error(err))
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, msgInvalidRequestBody)
 		return
 	}
@@ -209,7 +210,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 	response, err := h.auth.Refresh(ctx, req.RefreshToken)
 	if err != nil {
 		span.RecordError(err)
-		logger.Warn().Err(err).Msg("Refresh failed")
+		logger.Warn("Refresh failed", zap.Error(err))
 
 		switch {
 		case errors.Is(err, logicv1.ErrRefreshInvalid), errors.Is(err, logicv1.ErrRefreshReuse):
@@ -220,7 +221,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	logger.Info().Str("user_id", response.User.ID).Msg("Refresh successful")
+	logger.Info("Refresh successful", zap.String("user_id", response.User.ID))
 	c.JSON(http.StatusOK, response)
 }
 
