@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/rs/zerolog/log"
+	"go.uber.org/zap"
 
 	"github.com/duynhlab/auth-service/config"
 	migrations "github.com/duynhlab/auth-service/db/migrations"
@@ -28,7 +28,7 @@ import (
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
 	webv1 "github.com/duynhlab/auth-service/internal/web/v1"
 	"github.com/duynhlab/auth-service/middleware"
-	"github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 )
@@ -37,13 +37,17 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	// Initialize Zerolog with LOG_LEVEL from config
-	zerolog.Setup(cfg.Logging.Level)
+	// Initialize structured logger with LOG_LEVEL from config
+	logger, err := zapx.New(cfg.Logging.Level)
+	if err != nil {
+		panic("Failed to initialize logger: " + err.Error())
+	}
+	defer func() { _ = logger.Sync() }()
 
 	// Subcommands (`migrate`, `seed`) run an embedded SQL set and exit; no args
 	// serves the app.
 	if len(os.Args) > 1 {
-		if runSubcommand(os.Args[1], cfg) {
+		if runSubcommand(os.Args[1], cfg, logger) {
 			return
 		}
 	}
@@ -52,30 +56,30 @@ func main() {
 		panic("Configuration validation failed: " + err.Error())
 	}
 
-	log.Info().
-		Str("service", cfg.Service.Name).
-		Str("version", cfg.Service.Version).
-		Str("env", cfg.Service.Env).
-		Str("port", cfg.Service.Port).
-		Msg("Service starting")
+	logger.Info("Service starting",
+		zap.String("service", cfg.Service.Name),
+		zap.String("version", cfg.Service.Version),
+		zap.String("env", cfg.Service.Env),
+		zap.String("port", cfg.Service.Port),
+	)
 
 	// RS256 access-token signer — the only credential (RFC-0009 Phase 5).
 	// Built before the observability defers below so a fatal key-config error is
 	// not flagged by gocritic's exitAfterDefer (and fails fast).
 	signer, ephemeral, err := authjwt.NewSigner(cfg.JWT.PrivateKeyPEM, cfg.JWT.Issuer, cfg.JWT.Audience, cfg.JWT.AccessTTL)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize JWT signer")
+		logger.Fatal("Failed to initialize JWT signer", zap.Error(err))
 	}
 	if ephemeral {
 		// An ephemeral per-pod key breaks multi-replica verification (each pod
 		// serves a different JWKS) and invalidates all tokens on restart — refuse
 		// it in production; keep the convenience for local/dev only.
 		if cfg.IsProduction() {
-			log.Fatal().Msg("JWT_PRIVATE_KEY_PEM is required in production — refusing to start with an ephemeral signing key")
+			logger.Fatal("JWT_PRIVATE_KEY_PEM is required in production — refusing to start with an ephemeral signing key")
 		}
-		log.Warn().Msg("JWT signing key not configured (JWT_PRIVATE_KEY_PEM) — using an EPHEMERAL key; set a stable key in production")
+		logger.Warn("JWT signing key not configured (JWT_PRIVATE_KEY_PEM) — using an EPHEMERAL key; set a stable key in production")
 	} else {
-		log.Info().Str("kid", signer.Kid()).Msg("JWT signer initialized")
+		logger.Info("JWT signer initialized", zap.String("kid", signer.Kid()))
 	}
 
 	// RFC-0014: single OTel wiring point — traces per TRACING_ENABLED, OTLP
@@ -88,41 +92,41 @@ func main() {
 	var tp interface{ Shutdown(context.Context) error }
 	obs, err := obsx.SetupObservability(context.Background(), otelCfg)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to initialize OpenTelemetry")
+		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
 	} else {
 		tp = obs
-		log.Info().
-			Bool("traces", obs.TracerProvider != nil).
-			Bool("otlp_metrics", obs.MeterProvider != nil).
-			Bool("otlp_logs", obs.LoggerProvider != nil).
-			Str("endpoint", otelCfg.Endpoint).
-			Float64("sample_rate", otelCfg.SampleRate).
-			Msg("OpenTelemetry initialized")
+		logger.Info("OpenTelemetry initialized",
+			zap.Bool("traces", obs.TracerProvider != nil),
+			zap.Bool("otlp_metrics", obs.MeterProvider != nil),
+			zap.Bool("otlp_logs", obs.LoggerProvider != nil),
+			zap.String("endpoint", otelCfg.Endpoint),
+			zap.Float64("sample_rate", otelCfg.SampleRate),
+		)
 	}
 
 	// Initialize Pyroscope profiling
 	if cfg.Profiling.Enabled {
 		stopProfiling, err := obsx.SetupProfiling()
 		if err != nil {
-			log.Warn().Err(err).Msg("Failed to initialize profiling")
+			logger.Warn("Failed to initialize profiling", zap.Error(err))
 		} else {
-			log.Info().
-				Str("endpoint", cfg.Profiling.Endpoint).
-				Msg("Profiling initialized")
+			logger.Info("Profiling initialized",
+				zap.String("endpoint", cfg.Profiling.Endpoint),
+			)
 			defer func() { _ = stopProfiling(context.Background()) }()
 		}
 	} else {
-		log.Info().Msg("Profiling disabled (PROFILING_ENABLED=false)")
+		logger.Info("Profiling disabled (PROFILING_ENABLED=false)")
 	}
 
 	// Initialize database connection pool (pgx)
 	pool, err := database.Connect(context.Background(), cfg.Database)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to connect to database")
+		logger.Error("Failed to connect to database", zap.Error(err))
 		return
 	}
 	// pool.Close() is called explicitly during graceful shutdown (step 2).
-	log.Info().Msg("Database connection pool established")
+	logger.Info("Database connection pool established")
 
 	// Wire dependencies: Core repositories -> Logic service -> Web handler
 	userRepo := repository.NewUserRepository(pool)
@@ -133,8 +137,8 @@ func main() {
 
 	// Setup router and server, then run with graceful shutdown
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, handler, &isShuttingDown)
-	runGracefulShutdown(cfg, srv, pool, tp, &isShuttingDown)
+	srv := setupServer(cfg, handler, logger, &isShuttingDown)
+	runGracefulShutdown(cfg, srv, pool, tp, logger, &isShuttingDown)
 }
 
 // runSubcommand handles the `migrate` and `seed` subcommands. It returns true
@@ -145,23 +149,23 @@ func main() {
 // environment (init container, direct DB host). `seed` applies DEV-ONLY demo
 // data and is invoked explicitly — never by `migrate` or the serve path — so
 // production databases are never seeded.
-func runSubcommand(cmd string, cfg *config.Config) bool {
+func runSubcommand(cmd string, cfg *config.Config, logger *zap.Logger) bool {
 	switch cmd {
 	case "migrate":
 		if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
-			log.Fatal().Err(err).Msg("Schema migration failed")
+			logger.Fatal("Schema migration failed", zap.Error(err))
 		}
-		log.Info().Msg("Schema migrations applied")
+		logger.Info("Schema migrations applied")
 		return true
 	case "seed":
 		// Demo data is DEV-ONLY; refuse to seed a production database.
 		if cfg.IsProduction() {
-			log.Fatal().Msg("seed refused in production — demo data is dev-only")
+			logger.Fatal("seed refused in production — demo data is dev-only")
 		}
 		if err := applySeed(cfg); err != nil {
-			log.Fatal().Err(err).Msg("Demo seed failed")
+			logger.Fatal("Demo seed failed", zap.Error(err))
 		}
-		log.Info().Msg("Demo seed data applied")
+		logger.Info("Demo seed data applied")
 		return true
 	default:
 		return false
@@ -212,14 +216,14 @@ func applySeed(cfg *config.Config) error {
 }
 
 // setupServer creates and configures the HTTP server with all routes and middleware.
-func setupServer(cfg *config.Config, handler *webv1.Handler, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, handler *webv1.Handler, logger *zap.Logger, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	// Tracing middleware
 	r.Use(middleware.TracingMiddleware())
 
 	// Logging middleware
-	r.Use(middleware.LoggingMiddleware())
+	r.Use(middleware.LoggingMiddleware(logger))
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
@@ -254,13 +258,14 @@ func runGracefulShutdown(
 	srv *http.Server,
 	pool *pgxpool.Pool,
 	tp interface{ Shutdown(context.Context) error },
+	logger *zap.Logger,
 	isShuttingDown *atomic.Bool,
 ) {
 	// Start server in a goroutine
 	go func() {
-		log.Info().Str("port", cfg.Service.Port).Msg("Starting auth service")
+		logger.Info("Starting auth service", zap.String("port", cfg.Service.Port))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal().Err(err).Msg("Failed to start server")
+			logger.Fatal("Failed to start server", zap.Error(err))
 		}
 	}()
 
@@ -270,7 +275,7 @@ func runGracefulShutdown(
 
 	// Wait for shutdown signal
 	<-ctx.Done()
-	log.Info().Msg("Shutdown signal received")
+	logger.Info("Shutdown signal received")
 
 	// Mark service as shutting down so /ready returns 503 immediately.
 	isShuttingDown.Store(true)
@@ -278,9 +283,9 @@ func runGracefulShutdown(
 	// Fail readiness first and wait for propagation (best practice for K8s rollout).
 	drainDelay := cfg.GetReadinessDrainDelayDuration()
 	if drainDelay > 0 {
-		log.Info().Dur("delay", drainDelay).Msg("Readiness drain delay started")
+		logger.Info("Readiness drain delay started", zap.Duration("delay", drainDelay))
 		time.Sleep(drainDelay)
-		log.Info().Dur("delay", drainDelay).Msg("Readiness drain delay completed")
+		logger.Info("Readiness drain delay completed", zap.Duration("delay", drainDelay))
 	}
 
 	// Shutdown context with configurable timeout
@@ -288,30 +293,30 @@ func runGracefulShutdown(
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	log.Info().Dur("timeout", shutdownTimeout).Msg("Shutting down server...")
+	logger.Info("Shutting down server...", zap.Duration("timeout", shutdownTimeout))
 
 	// 1. Shutdown HTTP server
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("HTTP server shutdown error")
+		logger.Error("HTTP server shutdown error", zap.Error(err))
 	} else {
-		log.Info().Msg("HTTP server shutdown complete")
+		logger.Info("HTTP server shutdown complete")
 	}
 
 	// 2. Close database connection pool
 	if pool != nil {
 		pool.Close()
-		log.Info().Msg("Database connection pool closed")
+		logger.Info("Database connection pool closed")
 	}
 
 	// 3. Shutdown the OTel SDK — flushes pending spans plus any OTLP
 	// metrics/logs providers built behind the RFC-0014 flags.
 	if tp != nil {
 		if err := tp.Shutdown(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("OpenTelemetry shutdown error")
+			logger.Error("OpenTelemetry shutdown error", zap.Error(err))
 		} else {
-			log.Info().Msg("OpenTelemetry shutdown complete")
+			logger.Info("OpenTelemetry shutdown complete")
 		}
 	}
 
-	log.Info().Msg("Graceful shutdown complete")
+	logger.Info("Graceful shutdown complete")
 }

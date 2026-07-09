@@ -5,11 +5,11 @@ import (
 	"encoding/hex"
 	"time"
 
-	pkgzerolog "github.com/duynhlab/pkg/logger/zerolog"
+	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/obsx"
 	"github.com/gin-gonic/gin"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const TraceIDHeader = "X-Trace-ID"
@@ -74,8 +74,8 @@ func generateTraceID() string {
 	return hex.EncodeToString(b)
 }
 
-// LoggingMiddleware creates a Gin middleware for structured logging with trace-id using Zerolog
-func LoggingMiddleware() gin.HandlerFunc {
+// LoggingMiddleware creates a Gin middleware for structured logging with trace-id
+func LoggingMiddleware(logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
@@ -88,10 +88,10 @@ func LoggingMiddleware() gin.HandlerFunc {
 		c.Set("trace_id", traceID)
 
 		// Create a sub-logger with trace_id attached
-		logger := log.With().Str("trace_id", traceID).Logger()
+		loggerWithTrace := logger.With(zap.String("trace_id", traceID))
 
 		// Inject logger into context
-		ctx := logger.WithContext(c.Request.Context())
+		ctx := zapx.WithContext(c.Request.Context(), loggerWithTrace)
 		c.Request = c.Request.WithContext(ctx)
 
 		// Add trace-id to response header
@@ -104,27 +104,25 @@ func LoggingMiddleware() gin.HandlerFunc {
 		duration := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		// Create log event
-		var event *zerolog.Event
+		// Single request log; error level for 4xx/5xx, info otherwise.
+		level := zapcore.InfoLevel
 		if statusCode >= 400 {
-			event = logger.Error()
-		} else {
-			event = logger.Info()
+			level = zapcore.ErrorLevel
 		}
 
 		// Log request/response
-		event.
-			Str("method", method).
-			Str("path", path).
-			Int("status", statusCode).
-			Dur("duration", duration).
-			Str("client_ip", c.ClientIP()).
-			Str("user_agent", c.Request.UserAgent()).
-			Msg("HTTP request")
+		loggerWithTrace.Log(level, "HTTP request",
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.Int("status", statusCode),
+			zap.Duration("duration", duration),
+			zap.String("client_ip", c.ClientIP()),
+			zap.String("user_agent", c.Request.UserAgent()),
+		)
 	}
 }
 
-// GetLoggerFromGinContext - Helper to get zerolog from context
-func GetLoggerFromGinContext(c *gin.Context) *zerolog.Logger {
-	return pkgzerolog.FromContext(c.Request.Context())
+// GetLoggerFromGinContext - Helper to get the zap logger from context
+func GetLoggerFromGinContext(c *gin.Context) *zap.Logger {
+	return zapx.FromContext(c.Request.Context())
 }
