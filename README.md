@@ -34,7 +34,7 @@ auth-service is **HTTP-only** — the gRPC `GetMe` server was removed in RFC-000
 
 - **Metrics**: HTTP RED metrics (`request_duration_seconds`, `requests_in_flight`, request/response sizes) are recorded by the Prometheus middleware on `/metrics`. The platform ServiceMonitor scrapes `/metrics`.
 - **Tracing**: OpenTelemetry traces are exported via OTLP HTTP to the OTel Collector. The middleware chain runs in order **tracing → logging → metrics**.
-- **Logging**: structured Zerolog. The logging middleware derives `trace_id` from the active OTel span (`obsx.TraceIDFromContext`) for log↔trace correlation, falling back to inbound trace headers or a generated ID.
+- **Logging**: structured zap (shared `pkg/logger` zapx, teed into OTLP — RFC-0014 P4). The logging middleware derives `trace_id` from the active OTel span (`obsx.TraceIDFromContext`) for log↔trace correlation, falling back to inbound trace headers or a generated ID.
 - **Profiling**: Pyroscope continuous profiling (`PROFILING_ENABLED`, default on).
 
 ## Tech Stack
@@ -43,7 +43,7 @@ auth-service is **HTTP-only** — the gRPC `GetMe` server was removed in RFC-000
 - RS256 JWT signing + JWKS (`internal/core/jwt`), refresh-token rotation with reuse detection
 - PostgreSQL 17 (auth-db cluster, HA) via pgx/v5
 - Connection pooler (PgBouncer / transaction-mode pooler) — simple protocol, statement cache disabled
-- OpenTelemetry tracing + metrics, Zerolog logging, Pyroscope profiling
+- OpenTelemetry tracing + metrics, zap logging (zapx + OTLP tee), Pyroscope profiling
 
 ## Configuration
 
