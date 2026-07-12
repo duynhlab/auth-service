@@ -138,11 +138,11 @@ Routes mount directly at `/{service}/v1/{audience}/…` (Variant A — one URL s
 
 | Method | Path | Audience | Description |
 |--------|------|----------|-------------|
-| `POST` | `/auth/v1/public/login` | public | Login → `{access_token, refresh_token, expires_in, user}` |
-| `POST` | `/auth/v1/public/register` | public | Register → same response shape as login |
-| `POST` | `/auth/v1/public/refresh` | public | Rotate the refresh token, mint a new pair; reuse revokes the family |
-| `POST` | `/auth/v1/public/logout` | public | Body `{refresh_token}` — revoke the token family (idempotent) |
-| `GET` | `/auth/v1/public/jwks` | public | JWKS for local verification (services + Kong edge) |
+| `POST` | `/auth/v1/public/auth/login` | public | Login → `{access_token, refresh_token, expires_in, user}` |
+| `POST` | `/auth/v1/public/auth/register` | public | Register → same response shape as login |
+| `POST` | `/auth/v1/public/auth/refresh` | public | Rotate the refresh token, mint a new pair; reuse revokes the family |
+| `POST` | `/auth/v1/public/auth/logout` | public | Body `{refresh_token}` — revoke the token family (idempotent) |
+| `GET` | `/auth/v1/public/auth/jwks` | public | JWKS for local verification (services + Kong edge) |
 
 Services verify JWTs locally via `pkg/authmw` (`MiddlewareJWT`) against this JWKS — no runtime call to auth-service on the hot path.
 
