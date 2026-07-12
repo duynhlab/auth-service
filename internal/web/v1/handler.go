@@ -35,17 +35,26 @@ func NewHandler(auth *logicv1.AuthService) *Handler {
 // RegisterRoutes mounts auth v1 routes using Variant A edge naming
 // (see homelab/docs/api/api-naming-convention.md).
 func (h *Handler) RegisterRoutes(r gin.IRouter) {
+	r.POST("/auth/v1/public/auth/login", h.Login)
+	r.POST("/auth/v1/public/auth/register", h.Register)
+	r.POST("/auth/v1/public/auth/refresh", h.Refresh)
+	r.GET("/auth/v1/public/auth/jwks", h.JWKS)
+	// Logout is public (like refresh): it authenticates by the refresh token in
+	// the body, so a client with an expired access token can still revoke.
+	r.POST("/auth/v1/public/auth/logout", h.Logout)
+
+	// Deprecated aliases — pre-v3 paths kept for one release so older callers
+	// (SPA bundles, service JWKS fetchers) survive the rollout. Remove after
+	// the v3 rollout completes; see homelab ADR-017.
 	r.POST("/auth/v1/public/login", h.Login)
 	r.POST("/auth/v1/public/register", h.Register)
 	r.POST("/auth/v1/public/refresh", h.Refresh)
 	r.GET("/auth/v1/public/jwks", h.JWKS)
-	// Logout is public (like refresh): it authenticates by the refresh token in
-	// the body, so a client with an expired access token can still revoke.
 	r.POST("/auth/v1/public/logout", h.Logout)
 }
 
 // JWKS serves the JSON Web Key Set for verifying signed access tokens.
-// GET /auth/v1/public/jwks
+// GET /auth/v1/public/auth/jwks
 func (h *Handler) JWKS(c *gin.Context) {
 	body, err := h.auth.JWKS()
 	if err != nil {
@@ -61,7 +70,7 @@ func (h *Handler) JWKS(c *gin.Context) {
 // session server-side (the outstanding access token simply expires — JWTs are
 // stateless). Idempotent — an unknown or already-revoked token still returns
 // 200 so clients can safely clear local state.
-// POST /auth/v1/public/logout  Body: {"refresh_token": "..."}
+// POST /auth/v1/public/auth/logout  Body: {"refresh_token": "..."}
 func (h *Handler) Logout(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
@@ -185,7 +194,7 @@ func (h *Handler) Register(c *gin.Context) {
 }
 
 // Refresh rotates a refresh token and returns a fresh access + refresh token.
-// POST /auth/v1/public/refresh  Body: {"refresh_token": "..."}
+// POST /auth/v1/public/auth/refresh  Body: {"refresh_token": "..."}
 func (h *Handler) Refresh(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),

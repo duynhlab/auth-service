@@ -111,7 +111,7 @@ func bcryptHash(t *testing.T, pw string) string {
 // --- Login ---
 
 func TestLogin_BadJSON(t *testing.T) {
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/login", "{", nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/login", "{", nil)
 	newHandler(t, &mockUserRepo{}).Login(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -124,7 +124,7 @@ func TestLogin_BadJSON(t *testing.T) {
 
 func TestLogin_InvalidCredentials(t *testing.T) {
 	users := &mockUserRepo{user: &domain.UserRow{ID: 1, Username: "alice", PasswordHash: bcryptHash(t, "correct")}}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/login",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/login",
 		`{"username":"alice","password":"wrong"}`, nil)
 	newHandler(t, users).Login(c)
 
@@ -137,7 +137,7 @@ func TestLogin_InvalidCredentials(t *testing.T) {
 }
 
 func TestLogin_UserNotFound(t *testing.T) {
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/login",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/login",
 		`{"username":"ghost","password":"whatever"}`, nil)
 	newHandler(t, &mockUserRepo{user: nil}).Login(c)
 
@@ -151,7 +151,7 @@ func TestLogin_UserNotFound(t *testing.T) {
 
 func TestLogin_ServiceError(t *testing.T) {
 	users := &mockUserRepo{getErr: context.DeadlineExceeded}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/login",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/login",
 		`{"username":"alice","password":"pw"}`, nil)
 	newHandler(t, users).Login(c)
 
@@ -165,7 +165,7 @@ func TestLogin_ServiceError(t *testing.T) {
 
 func TestLogin_Success(t *testing.T) {
 	users := &mockUserRepo{user: &domain.UserRow{ID: 1, Username: "alice", Email: "a@x.io", PasswordHash: bcryptHash(t, "password123")}}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/login",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/login",
 		`{"username":"alice","password":"password123"}`, nil)
 	newHandler(t, users).Login(c)
 
@@ -184,7 +184,7 @@ func TestLogin_Success(t *testing.T) {
 // --- Register ---
 
 func TestRegister_BadJSON(t *testing.T) {
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/register", "{", nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/register", "{", nil)
 	newHandler(t, &mockUserRepo{}).Register(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -197,7 +197,7 @@ func TestRegister_BadJSON(t *testing.T) {
 
 func TestRegister_Conflict(t *testing.T) {
 	users := &mockUserRepo{exists: true}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/register",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/register",
 		`{"username":"alice","email":"a@x.io","password":"password123"}`, nil)
 	newHandler(t, users).Register(c)
 
@@ -211,7 +211,7 @@ func TestRegister_Conflict(t *testing.T) {
 
 func TestRegister_ServiceError(t *testing.T) {
 	users := &mockUserRepo{existsErr: context.DeadlineExceeded}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/register",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/register",
 		`{"username":"alice","email":"a@x.io","password":"password123"}`, nil)
 	newHandler(t, users).Register(c)
 
@@ -225,7 +225,7 @@ func TestRegister_ServiceError(t *testing.T) {
 
 func TestRegister_Success(t *testing.T) {
 	users := &mockUserRepo{exists: false, createID: 42}
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/register",
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/register",
 		`{"username":"alice","email":"a@x.io","password":"password123"}`, nil)
 	newHandler(t, users).Register(c)
 
@@ -250,7 +250,7 @@ func newRefreshHandler(t *testing.T, refresh domain.RefreshTokenRepository) *Han
 
 func TestRefresh_BadJSON(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", "{", nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", "{", nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -263,7 +263,7 @@ func TestRefresh_BadJSON(t *testing.T) {
 
 func TestRefresh_MissingToken(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", `{}`, nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -276,7 +276,7 @@ func TestRefresh_MissingToken(t *testing.T) {
 
 func TestRefresh_Invalid(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{row: nil})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"nope"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", `{"refresh_token":"nope"}`, nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusUnauthorized {
@@ -291,7 +291,7 @@ func TestRefresh_Reuse(t *testing.T) {
 	used := time.Now().Add(-time.Minute)
 	row := &domain.RefreshTokenRow{UserID: 7, Username: "alice", FamilyID: "fam", UsedAt: &used, ExpiresAt: time.Now().Add(time.Hour)}
 	h := newRefreshHandler(t, &mockRefreshRepo{row: row})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"replayed"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", `{"refresh_token":"replayed"}`, nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusUnauthorized {
@@ -304,7 +304,7 @@ func TestRefresh_Reuse(t *testing.T) {
 
 func TestRefresh_ServiceError(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{getErr: context.DeadlineExceeded})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"x"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", `{"refresh_token":"x"}`, nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusInternalServerError {
@@ -318,7 +318,7 @@ func TestRefresh_ServiceError(t *testing.T) {
 func TestRefresh_Success(t *testing.T) {
 	row := &domain.RefreshTokenRow{UserID: 7, Username: "alice", Email: "a@x.io", FamilyID: "fam", ExpiresAt: time.Now().Add(time.Hour)}
 	h := newRefreshHandler(t, &mockRefreshRepo{row: row})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/refresh", `{"refresh_token":"valid"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/refresh", `{"refresh_token":"valid"}`, nil)
 	h.Refresh(c)
 
 	if rec.Code != http.StatusOK {
@@ -337,7 +337,7 @@ func TestRefresh_Success(t *testing.T) {
 
 func TestLogout_BadJSON(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/logout", "{", nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/logout", "{", nil)
 	h.Logout(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -350,7 +350,7 @@ func TestLogout_BadJSON(t *testing.T) {
 
 func TestLogout_MissingToken(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/logout", `{}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/logout", `{}`, nil)
 	h.Logout(c)
 
 	if rec.Code != http.StatusBadRequest {
@@ -364,7 +364,7 @@ func TestLogout_MissingToken(t *testing.T) {
 func TestLogout_ServiceError(t *testing.T) {
 	row := &domain.RefreshTokenRow{UserID: 7, FamilyID: "fam", ExpiresAt: time.Now().Add(time.Hour)}
 	h := newRefreshHandler(t, &mockRefreshRepo{row: row, revokeErr: context.DeadlineExceeded})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/logout", `{"refresh_token":"tok"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/logout", `{"refresh_token":"tok"}`, nil)
 	h.Logout(c)
 
 	if rec.Code != http.StatusInternalServerError {
@@ -378,7 +378,7 @@ func TestLogout_ServiceError(t *testing.T) {
 func TestLogout_Success(t *testing.T) {
 	row := &domain.RefreshTokenRow{UserID: 7, FamilyID: "fam", ExpiresAt: time.Now().Add(time.Hour)}
 	h := newRefreshHandler(t, &mockRefreshRepo{row: row})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/logout", `{"refresh_token":"tok"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/logout", `{"refresh_token":"tok"}`, nil)
 	h.Logout(c)
 
 	if rec.Code != http.StatusOK {
@@ -388,7 +388,7 @@ func TestLogout_Success(t *testing.T) {
 
 func TestLogout_UnknownTokenIdempotent(t *testing.T) {
 	h := newRefreshHandler(t, &mockRefreshRepo{row: nil})
-	c, rec := newCtx(http.MethodPost, "/auth/v1/public/logout", `{"refresh_token":"unknown"}`, nil)
+	c, rec := newCtx(http.MethodPost, "/auth/v1/public/auth/logout", `{"refresh_token":"unknown"}`, nil)
 	h.Logout(c)
 
 	if rec.Code != http.StatusOK {
@@ -400,7 +400,7 @@ func TestLogout_UnknownTokenIdempotent(t *testing.T) {
 
 func TestJWKS_NoSigner(t *testing.T) {
 	h := NewHandler(logicv1.NewAuthService(&mockUserRepo{}, nil, nil, 0))
-	c, rec := newCtx(http.MethodGet, "/auth/v1/public/jwks", "", nil)
+	c, rec := newCtx(http.MethodGet, "/auth/v1/public/auth/jwks", "", nil)
 	h.JWKS(c)
 
 	if rec.Code != http.StatusNotFound {
@@ -414,7 +414,7 @@ func TestJWKS_NoSigner(t *testing.T) {
 func TestJWKS_WithSigner(t *testing.T) {
 	h := newHandler(t, &mockUserRepo{})
 
-	c, rec := newCtx(http.MethodGet, "/auth/v1/public/jwks", "", nil)
+	c, rec := newCtx(http.MethodGet, "/auth/v1/public/auth/jwks", "", nil)
 	h.JWKS(c)
 
 	if rec.Code != http.StatusOK {
@@ -426,5 +426,39 @@ func TestJWKS_WithSigner(t *testing.T) {
 	body := decode(t, rec)
 	if _, ok := body["keys"]; !ok {
 		t.Errorf("expected 'keys' in JWKS body, got %v", body)
+	}
+}
+
+// --- Route mounting (v3 canonical + deprecated aliases) ---
+
+// TestRegisterRoutes_CanonicalAndAliasMounted locks the expand phase of the
+// v3 path migration (homelab ADR-017): the collection-noun paths are
+// canonical and the pre-v3 paths stay mounted as deprecated aliases until
+// the contract release removes them.
+func TestRegisterRoutes_CanonicalAndAliasMounted(t *testing.T) {
+	r := gin.New()
+	newHandler(t, &mockUserRepo{}).RegisterRoutes(r)
+
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/auth/v1/public/auth/jwks"},
+		{http.MethodGet, "/auth/v1/public/jwks"}, // deprecated alias
+		{http.MethodPost, "/auth/v1/public/auth/login"},
+		{http.MethodPost, "/auth/v1/public/login"}, // deprecated alias
+		{http.MethodPost, "/auth/v1/public/auth/register"},
+		{http.MethodPost, "/auth/v1/public/register"}, // deprecated alias
+		{http.MethodPost, "/auth/v1/public/auth/refresh"},
+		{http.MethodPost, "/auth/v1/public/refresh"}, // deprecated alias
+		{http.MethodPost, "/auth/v1/public/auth/logout"},
+		{http.MethodPost, "/auth/v1/public/logout"}, // deprecated alias
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{"))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(rec, req)
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("%s %s not mounted (got 404)", tc.method, tc.path)
+		}
 	}
 }

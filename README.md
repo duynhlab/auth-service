@@ -7,7 +7,7 @@ Authentication microservice for user login, registration, and RS256 JWT issuance
 - User login/registration issuing RS256 JWT access tokens (1 h TTL) + rotating refresh tokens (bcrypt password verification, constant-time user-not-found path)
 - Token refresh with rotation and reuse detection — replaying a rotated token revokes the whole token family
 - Logout by refresh token — revokes the token family server-side (idempotent); the outstanding access token simply expires
-- JWKS publication (`GET /auth/v1/public/jwks`) for local verification by services and Kong's edge `jwt` plugin
+- JWKS publication (`GET /auth/v1/public/auth/jwks`) for local verification by services and Kong's edge `jwt` plugin
 
 ## API Endpoints
 
@@ -15,16 +15,19 @@ All HTTP routes follow Variant A naming — single path for browser and in-clust
 
 | Method | Path | Audience |
 |--------|------|----------|
-| `POST` | `/auth/v1/public/login` | public |
-| `POST` | `/auth/v1/public/register` | public |
-| `POST` | `/auth/v1/public/refresh` | public |
-| `POST` | `/auth/v1/public/logout` | public |
-| `GET` | `/auth/v1/public/jwks` | public |
+| `POST` | `/auth/v1/public/auth/login` | public |
+| `POST` | `/auth/v1/public/auth/register` | public |
+| `POST` | `/auth/v1/public/auth/refresh` | public |
+| `POST` | `/auth/v1/public/auth/logout` | public |
+| `GET` | `/auth/v1/public/auth/jwks` | public |
+
+The pre-v3 paths (`/auth/v1/public/{login,…,jwks}`) stay mounted as **deprecated
+aliases** for one release during the v3 rollout (homelab ADR-017).
 
 Auth is **public-only**: login/register/refresh return `{access_token, refresh_token, expires_in, user}`; logout takes `{refresh_token}` in the body (so an expired access token can still revoke) and revokes the family. The `/private/` prefix was removed with the opaque tokens.
 
 - Browser: `https://gateway.duynh.me/auth/v1/public/…`
-- In-cluster JWKS: `http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks`
+- In-cluster JWKS: `http://auth.auth.svc.cluster.local:8080/auth/v1/public/auth/jwks`
 
 ## Token model (JWT-only)
 
