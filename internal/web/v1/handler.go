@@ -6,7 +6,6 @@ import (
 
 	"github.com/duynhlab/auth-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/auth-service/internal/logic/v1"
-	"github.com/duynhlab/auth-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/gin-gonic/gin"
@@ -72,12 +71,11 @@ func (h *Handler) JWKS(c *gin.Context) {
 // 200 so clients can safely clear local state.
 // POST /auth/v1/public/auth/logout  Body: {"refresh_token": "..."}
 func (h *Handler) Logout(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	// otelgin already opened the server span for this request (method/route are
+	// on it); annotate that span rather than minting a child. Do NOT end it —
+	// otelgin owns its lifecycle.
+	span := trace.SpanFromContext(ctx)
 
 	logger := zapx.FromContext(ctx)
 
@@ -103,12 +101,11 @@ func (h *Handler) Logout(c *gin.Context) {
 
 // Login handles HTTP request for user login.
 func (h *Handler) Login(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	// otelgin already opened the server span for this request (method/route are
+	// on it); annotate that span rather than minting a child. Do NOT end it —
+	// otelgin owns its lifecycle.
+	span := trace.SpanFromContext(ctx)
 
 	logger := zapx.FromContext(ctx)
 
@@ -151,12 +148,11 @@ func (h *Handler) Login(c *gin.Context) {
 
 // Register handles HTTP request for user registration.
 func (h *Handler) Register(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	// otelgin already opened the server span for this request (method/route are
+	// on it); annotate that span rather than minting a child. Do NOT end it —
+	// otelgin owns its lifecycle.
+	span := trace.SpanFromContext(ctx)
 
 	logger := zapx.FromContext(ctx)
 
@@ -196,12 +192,11 @@ func (h *Handler) Register(c *gin.Context) {
 // Refresh rotates a refresh token and returns a fresh access + refresh token.
 // POST /auth/v1/public/auth/refresh  Body: {"refresh_token": "..."}
 func (h *Handler) Refresh(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	// otelgin already opened the server span for this request (method/route are
+	// on it); annotate that span rather than minting a child. Do NOT end it —
+	// otelgin owns its lifecycle.
+	span := trace.SpanFromContext(ctx)
 
 	logger := zapx.FromContext(ctx)
 
