@@ -126,7 +126,6 @@ func (s *AuthService) issueRefreshBestEffort(ctx context.Context, span trace.Spa
 func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*domain.AuthResponse, error) {
 	ctx, span := middleware.StartSpan(ctx, "auth.login", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String("username", req.Username),
 	))
 	defer span.End()
 
@@ -212,8 +211,6 @@ func (s *AuthService) mintAccessToken(span trace.Span, response *domain.AuthResp
 func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) (*domain.AuthResponse, error) {
 	ctx, span := middleware.StartSpan(ctx, "auth.register", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String("username", req.Username),
-		attribute.String("email", req.Email),
 	))
 	defer span.End()
 
@@ -221,6 +218,7 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		span.RecordError(err)
+		recordRegistration(ctx, regError)
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
@@ -228,10 +226,12 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	exists, err := s.users.ExistsByUsernameOrEmail(ctx, req.Username, req.Email)
 	if err != nil {
 		span.RecordError(err)
+		recordRegistration(ctx, regError)
 		return nil, fmt.Errorf("check existing user: %w", err)
 	}
 	if exists {
 		span.SetAttributes(attribute.Bool("registration.success", false))
+		recordRegistration(ctx, regConflict)
 		return nil, fmt.Errorf("register user %q: %w", req.Username, ErrUserExists)
 	}
 
@@ -239,6 +239,7 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	userID, err := s.users.Create(ctx, req.Username, req.Email, string(passwordHash))
 	if err != nil {
 		span.RecordError(err)
+		recordRegistration(ctx, regError)
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
 
@@ -256,6 +257,7 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	// failure fails the registration response (the user row already exists;
 	// the client can log in once the signer recovers).
 	if err := s.mintAccessToken(span, response); err != nil {
+		recordRegistration(ctx, regError)
 		return nil, err
 	}
 
@@ -268,6 +270,7 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	)
 	span.AddEvent("user.registered")
 
+	recordRegistration(ctx, regSuccess)
 	return response, nil
 }
 
@@ -279,6 +282,10 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 func (s *AuthService) handleReuse(ctx context.Context, span trace.Span, familyID string) error {
 	span.SetAttributes(attribute.Bool("refresh.reuse", true))
 	span.AddEvent("refresh.reuse_detected")
+	// Count the detection before the revoke: reuse WAS detected regardless of
+	// whether the family revoke below succeeds — a failed revoke returns 500 but
+	// the security signal still stands.
+	recordRefresh(ctx, refreshReuse)
 	if revErr := s.refreshTokens.RevokeFamily(ctx, familyID); revErr != nil {
 		span.RecordError(fmt.Errorf("revoke refresh family: %w", revErr))
 		return fmt.Errorf("revoke refresh family %q: %w", familyID, revErr)
@@ -317,11 +324,13 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*dom
 	}
 	if row == nil {
 		span.SetAttributes(attribute.Bool(attrRefreshValid, false))
+		recordRefresh(ctx, refreshInvalid)
 		return nil, fmt.Errorf("lookup refresh token: %w", ErrRefreshInvalid)
 	}
 
 	if time.Now().After(row.ExpiresAt) {
 		span.SetAttributes(attribute.Bool(attrRefreshValid, false))
+		recordRefresh(ctx, refreshExpired)
 		return nil, fmt.Errorf("refresh token expired at %v: %w", row.ExpiresAt, ErrRefreshInvalid)
 	}
 
@@ -361,6 +370,7 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*dom
 	)
 	span.AddEvent("refresh.rotated")
 
+	recordRefresh(ctx, refreshRotated)
 	return &domain.AuthResponse{
 		AccessToken:  access,
 		RefreshToken: newRaw,
