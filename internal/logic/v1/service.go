@@ -138,14 +138,18 @@ func (s *AuthService) Login(ctx context.Context, req domain.LoginRequest) (*doma
 	if row == nil {
 		// Run bcrypt against a dummy hash to equalize response timing with the
 		// password-mismatch path, preventing username enumeration via timing.
+		stopCmp := startHashTimer(ctx, compareOp)
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(req.Password))
+		stopCmp()
 		span.SetAttributes(attribute.Bool("auth.success", false))
 		span.AddEvent("authentication.failed")
 		return nil, fmt.Errorf("authenticate user %q: %w", req.Username, ErrUserNotFound)
 	}
 
 	// Verify password
+	stopCmp := startHashTimer(ctx, compareOp)
 	err = bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(req.Password))
+	stopCmp()
 	if err != nil {
 		span.SetAttributes(attribute.Bool("auth.success", false))
 		span.AddEvent("authentication.failed")
@@ -215,7 +219,9 @@ func (s *AuthService) Register(ctx context.Context, req domain.RegisterRequest) 
 	defer span.End()
 
 	// Hash password
+	stopHash := startHashTimer(ctx, hashOp)
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	stopHash()
 	if err != nil {
 		span.RecordError(err)
 		recordRegistration(ctx, regError)
@@ -290,6 +296,7 @@ func (s *AuthService) handleReuse(ctx context.Context, span trace.Span, familyID
 		span.RecordError(fmt.Errorf("revoke refresh family: %w", revErr))
 		return fmt.Errorf("revoke refresh family %q: %w", familyID, revErr)
 	}
+	recordFamilyRevocation(ctx, revokeReuse)
 	return fmt.Errorf("refresh token reuse in family %q: %w", familyID, ErrRefreshReuse)
 }
 
@@ -420,6 +427,7 @@ func (s *AuthService) Logout(ctx context.Context, rawRefreshToken string) error 
 		span.RecordError(err)
 		return fmt.Errorf("revoke refresh family %q: %w", row.FamilyID, err)
 	}
+	recordFamilyRevocation(ctx, revokeLogout)
 	span.AddEvent("refresh.family_revoked")
 	return nil
 }
