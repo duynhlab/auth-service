@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -73,9 +74,68 @@ func assertDelta(t *testing.T, name, result string, before, want int64) {
 }
 
 const (
-	regMetric     = "auth.registrations.total"
-	refreshMetric = "auth.refresh.operations.total"
+	regMetric        = "auth.registrations.total"
+	refreshMetric    = "auth.refresh.operations.total"
+	revocationMetric = "auth.family_revocations.total"
+	hashDurMetric    = "auth.password_hash.duration"
 )
+
+// findMetric returns the collected metric named `name` (and whether it exists).
+func findMetric(t *testing.T, name string) (metricdata.Metrics, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name == name {
+				return md, true
+			}
+		}
+	}
+	return metricdata.Metrics{}, false
+}
+
+// counterFor returns the cumulative value of int64 counter `name` for the data
+// point carrying key=val (0 when absent).
+func counterFor(t *testing.T, name, key, val string) int64 {
+	t.Helper()
+	md, ok := findMetric(t, name)
+	if !ok {
+		return 0
+	}
+	sum, ok := md.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s: unexpected data type %T", name, md.Data)
+	}
+	for _, dp := range sum.DataPoints {
+		if v, ok := dp.Attributes.Value(attribute.Key(key)); ok && v.AsString() == val {
+			return dp.Value
+		}
+	}
+	return 0
+}
+
+// histCountFor returns the sample count of float64 histogram `name` for the
+// data point carrying key=val (0 when absent).
+func histCountFor(t *testing.T, name, key, val string) uint64 {
+	t.Helper()
+	md, ok := findMetric(t, name)
+	if !ok {
+		return 0
+	}
+	hist, ok := md.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("%s: unexpected data type %T", name, md.Data)
+	}
+	for _, dp := range hist.DataPoints {
+		if v, ok := dp.Attributes.Value(attribute.Key(key)); ok && v.AsString() == val {
+			return dp.Count
+		}
+	}
+	return 0
+}
 
 // TestRecordRegistration asserts the bounded result labels and exactly-once
 // accounting: two success + one conflict + one error records grow each series
@@ -146,4 +206,155 @@ func TestServiceCallSitesRecordExactlyOnce(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 	assertDelta(t, refreshMetric, refreshRotated, baseRot, 1)
+}
+
+// TestRecordFamilyRevocation asserts the two bounded reason labels and
+// exactly-once accounting for the family-revocation recorder.
+func TestRecordFamilyRevocation(t *testing.T) {
+	ctx := context.Background()
+	baseLogout := counterFor(t, revocationMetric, "reason", revokeLogout)
+	baseReuse := counterFor(t, revocationMetric, "reason", revokeReuse)
+
+	recordFamilyRevocation(ctx, revokeLogout)
+	recordFamilyRevocation(ctx, revokeLogout)
+	recordFamilyRevocation(ctx, revokeReuse)
+
+	if got := counterFor(t, revocationMetric, "reason", revokeLogout) - baseLogout; got != 2 {
+		t.Errorf("%s{reason=logout}: delta = %d, want 2", revocationMetric, got)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeReuse) - baseReuse; got != 1 {
+		t.Errorf("%s{reason=reuse}: delta = %d, want 1", revocationMetric, got)
+	}
+}
+
+// TestStartHashTimer asserts each timer records exactly one sample under its
+// bounded op label.
+func TestStartHashTimer(t *testing.T) {
+	ctx := context.Background()
+	baseHash := histCountFor(t, hashDurMetric, "op", hashOp)
+	baseCmp := histCountFor(t, hashDurMetric, "op", compareOp)
+
+	startHashTimer(ctx, hashOp)()
+	startHashTimer(ctx, compareOp)()
+	startHashTimer(ctx, compareOp)()
+
+	if got := histCountFor(t, hashDurMetric, "op", hashOp) - baseHash; got != 1 {
+		t.Errorf("%s{op=hash}: count delta = %d, want 1", hashDurMetric, got)
+	}
+	if got := histCountFor(t, hashDurMetric, "op", compareOp) - baseCmp; got != 2 {
+		t.Errorf("%s{op=compare}: count delta = %d, want 2", hashDurMetric, got)
+	}
+}
+
+// TestW2CallSitesRecordExactlyOnce drives the real logic through fakes to prove
+// the W2 instruments are wired at the correct call sites: recorded once when the
+// operation happens, and NOT recorded when a family revoke fails (the family is
+// still live, so it is not a revocation event).
+func TestW2CallSitesRecordExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	const password = "password123"
+
+	// Register happy path records exactly one password_hash{op=hash}.
+	svc := NewAuthService(&fakeUserRepository{}, &fakeRefreshTokenRepository{}, newTestSigner(t), time.Hour)
+	baseHash := histCountFor(t, hashDurMetric, "op", hashOp)
+	if _, err := svc.Register(ctx, domain.RegisterRequest{Username: "u", Email: "u@example.test", Password: password}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if got := histCountFor(t, hashDurMetric, "op", hashOp) - baseHash; got != 1 {
+		t.Errorf("register op=hash count delta = %d, want 1", got)
+	}
+
+	// Login with a valid user records exactly one password_hash{op=compare}.
+	users := &fakeUserRepository{
+		getByUsername: func(context.Context, string) (*domain.UserRow, error) {
+			return &domain.UserRow{ID: 7, Username: "alice", Email: "a@example.test", PasswordHash: hashPassword(t, password)}, nil
+		},
+	}
+	baseCmp := histCountFor(t, hashDurMetric, "op", compareOp)
+	if _, err := NewAuthService(users, nil, newTestSigner(t), time.Hour).Login(ctx, domain.LoginRequest{Username: "alice", Password: password}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if got := histCountFor(t, hashDurMetric, "op", compareOp) - baseCmp; got != 1 {
+		t.Errorf("valid-user login op=compare count delta = %d, want 1", got)
+	}
+
+	// Login for an unknown user still records exactly one compare (dummy path).
+	baseCmp2 := histCountFor(t, hashDurMetric, "op", compareOp)
+	if _, err := NewAuthService(&fakeUserRepository{}, nil, newTestSigner(t), time.Hour).Login(ctx, domain.LoginRequest{Username: "ghost", Password: password}); err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+	if got := histCountFor(t, hashDurMetric, "op", compareOp) - baseCmp2; got != 1 {
+		t.Errorf("unknown-user login op=compare count delta = %d, want 1", got)
+	}
+
+	// Logout records exactly one family_revocations{reason=logout}.
+	knownToken := func(family string) *fakeRefreshTokenRepository {
+		return &fakeRefreshTokenRepository{
+			getByHash: func(context.Context, string) (*domain.RefreshTokenRow, error) {
+				return &domain.RefreshTokenRow{UserID: 1, FamilyID: family, ExpiresAt: time.Now().Add(time.Hour)}, nil
+			},
+		}
+	}
+	baseLogout := counterFor(t, revocationMetric, "reason", revokeLogout)
+	if err := NewAuthService(&fakeUserRepository{}, knownToken("fam-logout"), newTestSigner(t), time.Hour).Logout(ctx, "raw"); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeLogout) - baseLogout; got != 1 {
+		t.Errorf("logout reason=logout delta = %d, want 1", got)
+	}
+
+	// Failed logout revoke must NOT record (family still live).
+	logoutFail := knownToken("fam-logout-fail")
+	logoutFail.revoke = func(context.Context, string) error { return errRepo }
+	baseLogoutFail := counterFor(t, revocationMetric, "reason", revokeLogout)
+	if err := NewAuthService(&fakeUserRepository{}, logoutFail, newTestSigner(t), time.Hour).Logout(ctx, "raw"); !errors.Is(err, errRepo) {
+		t.Fatalf("logout: err = %v, want errRepo", err)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeLogout) - baseLogoutFail; got != 0 {
+		t.Errorf("failed-revoke reason=logout delta = %d, want 0", got)
+	}
+
+	// Reuse (replayed used token) records exactly one family_revocations{reason=reuse}.
+	used := time.Now().Add(-time.Minute)
+	reusedToken := func(family string) *fakeRefreshTokenRepository {
+		return &fakeRefreshTokenRepository{
+			getByHash: func(context.Context, string) (*domain.RefreshTokenRow, error) {
+				return &domain.RefreshTokenRow{UserID: 1, FamilyID: family, UsedAt: &used, ExpiresAt: time.Now().Add(time.Hour)}, nil
+			},
+		}
+	}
+	baseReuse := counterFor(t, revocationMetric, "reason", revokeReuse)
+	if _, err := NewAuthService(&fakeUserRepository{}, reusedToken("fam-reuse"), newTestSigner(t), time.Hour).Refresh(ctx, "replayed"); !errors.Is(err, ErrRefreshReuse) {
+		t.Fatalf("refresh: err = %v, want ErrRefreshReuse", err)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeReuse) - baseReuse; got != 1 {
+		t.Errorf("reuse reason=reuse delta = %d, want 1", got)
+	}
+
+	// Lost rotation race (Rotate claimed=false) also funnels through handleReuse
+	// and records exactly one reuse revocation.
+	racedToken := &fakeRefreshTokenRepository{
+		getByHash: func(context.Context, string) (*domain.RefreshTokenRow, error) {
+			return &domain.RefreshTokenRow{UserID: 1, FamilyID: "fam-race", ExpiresAt: time.Now().Add(time.Hour)}, nil
+		},
+		rotate: func(context.Context, string, string, string, int, time.Time) (bool, error) { return false, nil },
+	}
+	baseRace := counterFor(t, revocationMetric, "reason", revokeReuse)
+	if _, err := NewAuthService(&fakeUserRepository{}, racedToken, newTestSigner(t), time.Hour).Refresh(ctx, "raced"); !errors.Is(err, ErrRefreshReuse) {
+		t.Fatalf("refresh: err = %v, want ErrRefreshReuse", err)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeReuse) - baseRace; got != 1 {
+		t.Errorf("lost-race reason=reuse delta = %d, want 1", got)
+	}
+
+	// Failed reuse revoke must NOT record.
+	reuseFail := reusedToken("fam-reuse-fail")
+	reuseFail.revoke = func(context.Context, string) error { return errRepo }
+	baseReuseFail := counterFor(t, revocationMetric, "reason", revokeReuse)
+	if _, err := NewAuthService(&fakeUserRepository{}, reuseFail, newTestSigner(t), time.Hour).Refresh(ctx, "replayed"); !errors.Is(err, errRepo) {
+		t.Fatalf("refresh: err = %v, want errRepo", err)
+	}
+	if got := counterFor(t, revocationMetric, "reason", revokeReuse) - baseReuseFail; got != 0 {
+		t.Errorf("failed-revoke reason=reuse delta = %d, want 0", got)
+	}
 }
