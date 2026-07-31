@@ -32,6 +32,19 @@ jobs:
       contents: read
       security-events: write
 
+  # CodeQL (go) + Govulncheck + Dependency Review behind one Security Gate.
+  # No `secrets: inherit` — the security scanners need no secrets.
+  go-security:
+    uses: duynhlab/gha-workflows/.github/workflows/go-security.yml@main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      security-events: write
+    with:
+      # Baseline first; flip to true once reachable vulnerabilities are fixed.
+      govulncheck-enforce: false
+
   sonar:
     needs: [go-check, gitleaks]
     uses: duynhlab/gha-workflows/.github/workflows/sonarqube.yml@main
