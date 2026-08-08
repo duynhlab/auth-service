@@ -89,7 +89,10 @@ func TestLoggingMiddleware(t *testing.T) {
 		wantTrace string // "" means "generated (32 hex chars)"
 	}{
 		{"2xx logs info", "/ok", http.StatusOK, nil, zapcore.InfoLevel, ""},
-		{"4xx logs error", "/bad", http.StatusBadRequest, nil, zapcore.ErrorLevel, ""},
+		// 4xx is a rejected request, not a broken service — for auth a wrong
+		// password is a 401, and counting it as an error inflates every
+		// log-based error query (observability.md error ownership).
+		{"4xx logs warn", "/bad", http.StatusBadRequest, nil, zapcore.WarnLevel, ""},
 		{"5xx logs error", "/fail", http.StatusInternalServerError, nil, zapcore.ErrorLevel, ""},
 		{
 			"trace_id from traceparent header", "/ok", http.StatusOK,
@@ -153,13 +156,14 @@ func TestLoggingMiddleware(t *testing.T) {
 					t.Errorf("field %q missing from request log", key)
 				}
 			}
-			gotTrace, _ := fields["trace_id"].(string)
-			if tt.wantTrace == "" {
-				if len(gotTrace) != 32 {
-					t.Errorf("trace_id = %q, want a generated 32-char id", gotTrace)
-				}
-			} else if gotTrace != tt.wantTrace {
-				t.Errorf("trace_id = %q, want %q", gotTrace, tt.wantTrace)
+			// No span is active in this test, so the record must carry NO
+			// trace_id — not the traceparent-derived one and not a generated
+			// one. An id in the log that the tracing backend does not have is
+			// worse than an absent field (telemetry audit F-1). The response
+			// header still carries it: that is a separate client contract,
+			// asserted in TestLoggingMiddlewareOmitsTraceIDWithoutSpan.
+			if _, present := fields["trace_id"]; present {
+				t.Errorf("no span, yet the record carries trace_id=%v", fields["trace_id"])
 			}
 		})
 	}
@@ -182,8 +186,15 @@ func TestLoggingMiddlewareInjectsTraceLogger(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("got %d handler log entries, want 1", len(entries))
 	}
-	if traceID, _ := entries[0].ContextMap()["trace_id"].(string); traceID != w.Header().Get(TraceIDHeader) {
-		t.Errorf("handler log trace_id = %q, want response header %q", traceID, w.Header().Get(TraceIDHeader))
+	// The injected logger carries the trace CONTEXT always (so OTLP records get
+	// native ids) but the readable trace_id string only when a span exists.
+	// There is no span here, so the field must be absent even though the
+	// response header is set.
+	if v, present := entries[0].ContextMap()["trace_id"]; present {
+		t.Errorf("no span, yet the handler logger carries trace_id=%v", v)
+	}
+	if w.Header().Get(TraceIDHeader) == "" {
+		t.Errorf("missing %s response header", TraceIDHeader)
 	}
 }
 
@@ -194,5 +205,107 @@ func TestGetLoggerFromGinContextFallback(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	if GetLoggerFromGinContext(c) == nil {
 		t.Error("GetLoggerFromGinContext returned nil without middleware")
+	}
+}
+
+// observedLogger returns a logger whose records land in the returned sink.
+func observedLogger() (*zap.Logger, *observer.ObservedLogs) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	return zap.New(core), logs
+}
+
+// The access log must skip routine SUCCESSFUL probes and keep failing ones —
+// docs/api/observability.md claims this middleware shares TracingMiddleware's
+// skip list, and telemetry audit F-2 found it had none.
+func TestLoggingMiddlewareSkipsSuccessfulProbesOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		status     int
+		wantRecord bool
+	}{
+		{"healthy probe is silent", "/health", http.StatusOK, false},
+		{"ready probe is silent", "/readyz", http.StatusOK, false},
+		{"metrics scrape is silent", "/metrics", http.StatusOK, false},
+		{"FAILING probe is logged", "/health", http.StatusServiceUnavailable, true},
+		{"real traffic is logged", "/v1/public/things", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, logs := observedLogger()
+			r := gin.New()
+			r.Use(LoggingMiddleware(logger))
+			r.GET(tc.path, func(c *gin.Context) { c.String(tc.status, "x") })
+
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+			got := logs.FilterMessage("HTTP request").Len()
+			if tc.wantRecord && got != 1 {
+				t.Errorf("%s %d: got %d access-log records, want 1", tc.path, tc.status, got)
+			}
+			if !tc.wantRecord && got != 0 {
+				t.Errorf("%s %d: got %d access-log records, want 0", tc.path, tc.status, got)
+			}
+		})
+	}
+}
+
+// A rejected request is not a broken service: observability.md's error-ownership
+// rule says expected business rejections must not read as infrastructure errors.
+func TestLoggingMiddlewareLevelByStatusClass(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		status int
+		want   zapcore.Level
+	}{
+		{http.StatusOK, zapcore.InfoLevel},
+		{http.StatusNotFound, zapcore.WarnLevel},
+		{http.StatusConflict, zapcore.WarnLevel},
+		{http.StatusInternalServerError, zapcore.ErrorLevel},
+	} {
+		logger, logs := observedLogger()
+		r := gin.New()
+		r.Use(LoggingMiddleware(logger))
+		r.GET("/x", func(c *gin.Context) { c.String(tc.status, "x") })
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+		rec := logs.FilterMessage("HTTP request").All()
+		if len(rec) != 1 {
+			t.Fatalf("status %d: got %d records, want 1", tc.status, len(rec))
+		}
+		if rec[0].Level != tc.want {
+			t.Errorf("status %d: level = %s, want %s", tc.status, rec[0].Level, tc.want)
+		}
+	}
+}
+
+// Without an active span there is no trace to join, so the record must carry no
+// trace_id at all rather than a generated one (telemetry audit F-1).
+func TestLoggingMiddlewareOmitsTraceIDWithoutSpan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, logs := observedLogger()
+	r := gin.New()
+	r.Use(LoggingMiddleware(logger))
+	r.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, "x") })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	rec := logs.FilterMessage("HTTP request").All()
+	if len(rec) != 1 {
+		t.Fatalf("got %d records, want 1", len(rec))
+	}
+	for _, f := range rec[0].Context {
+		if f.Key == "trace_id" {
+			t.Errorf("no span, yet the record carries trace_id=%q — a fabricated id joins to nothing", f.String)
+		}
+	}
+	if w.Header().Get(TraceIDHeader) == "" {
+		t.Errorf("missing %s response header", TraceIDHeader)
 	}
 }
