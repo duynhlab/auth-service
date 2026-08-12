@@ -1,149 +1,174 @@
-# auth-service — agent guide
+# auth-service AGENTS guide
 
-Tight, imperative reference for AI agents. Read this before touching the repo.
+Instructions for AI agents and human contributors working in this repository.
+Read it before making changes; keep edits surgical and consistent with what is
+already here.
+
+## Authority and scope
+
+This repository implements the service. It does **not** define the contract.
+
+- **Canonical contract:** [`homelab/docs/api/auth.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/auth.md)
+- **Shared API rules:** [`homelab/docs/api/api.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api.md)
+
+Implement against those files. When this repository and the contract disagree,
+**stop and classify the mismatch** using
+[Resolving a mismatch](https://github.com/duynhlab/homelab/blob/main/docs/api/README.md#resolving-a-mismatch)
+before changing either side. One class — an implementation that violates the
+intended contract — **blocks the release tag**.
+
+No route, payload or error inventory belongs in this file. Manifests, gateway
+routing, NetworkPolicy, database topology and platform observability belong to
+[duynhlab/homelab](https://github.com/duynhlab/homelab).
 
 ## Contribution workflow
 
-**Commits**
-
-- **No attribution trailers.** Never add `Signed-off-by`, `Co-authored-by`, `Assisted-by`, `Generated-by`, or any AI/tool attribution.
-- **Subject** ≤ 50 chars, capitalised, imperative, no trailing period (`Add session revocation`, not `Added`/`Adds`).
-- **Body** (only if non-trivial): explain *what* and *why*, wrap at 72 chars, one blank line after the subject.
-- **No issue refs** in the message (no `Fixes #123`). Put links in the PR description.
-- **No @-mentions** of users or teams.
-
-**Branch + PR**
-
-- **Never push to `main`.** Branch first: `feat|fix|chore|docs|refactor|ci/<desc>`.
-- Open a PR against `main`. **Squash-merge.**
-- Every changed line must trace to the task. Don't refactor or reformat adjacent code.
+- Never commit or push to `main`. Branch first, then open a PR.
+- Branch names use conventional prefixes: `feat/`, `fix/`, `docs/`, `chore/`,
+  `refactor/`, `test/`.
+- Commit subjects: imperative mood, capitalised, ≤ 50 characters, no trailing
+  period. Add a body wrapped at 72 characters when the change is non-trivial.
+- Do not add attribution trailers (`Signed-off-by`, `Co-authored-by`,
+  `Generated-by`, etc.), GitHub issue references, or `@`-mentions in commit
+  messages. Put issue links in the PR description.
+- PRs are squash-merged. CI (`go-check`) runs build, test and lint on every PR
+  and must be green before merge.
 
 ## Code quality
 
-- Write **idiomatic Go**. Follow existing patterns; match the surrounding style.
-- **Wrap errors** with context: `fmt.Errorf("query user %q: %w", name, err)`. Never swallow errors — check or explicit `_ =`.
-- **Structured logging** via Zerolog (shared `pkg/logger/zerolog`). No `fmt.Println`.
-- **Test** new behaviour. Table-driven tests; keep `go test ./...` green.
-- **No secrets** in code, logs, or fixtures. Gitleaks runs in CI.
-- Pass `golangci-lint` (v2, `.golangci.yml`) — zero tolerance, CI's `go-check` blocks merge.
-
-## Project overview
-
-`auth-service` — authentication microservice. Module `github.com/duynhlab/auth-service`.
-
-Issues **RS256 JWT access tokens** — the only credential (RFC-0009 Phase 5) — plus rotating, sha256-hashed, family-tracked refresh tokens with reuse detection. Handles login, registration, refresh, and logout (revokes the token family), and publishes the JWKS. **HTTP-only** — there is no gRPC server; every other service verifies JWTs locally against the JWKS.
-
-## Repository layout
-
-```
-auth-service/
-├── cmd/                     # Entry point: HTTP server, graceful shutdown
-├── config/                  # Env-based configuration + validation
-├── db/migrations/           # golang-migrate SQL migrations (sql/000001_*.up.sql), embedded in the binary via embed.go
-├── internal/
-│   ├── web/v1/              # HTTP handlers (Gin) — transport
-│   ├── logic/v1/            # Business rules + domain errors (NO SQL)
-│   └── core/                # Domain models, repository interfaces, pgx implementations, DB pool
-├── middleware/              # tracing, logging, prometheus, profiling, resource
-└── Dockerfile
-```
+- Run `golangci-lint run` (v2+, `.golangci.yml`) and fix every finding before
+  committing. Common ones: `perfsprint` (prefer `errors.New` when there are no
+  verbs), `nosprintfhostport` (use `net.JoinHostPort`), `errcheck` (check every
+  error or explicitly discard it), `noctx` (use the `*WithContext` constructors),
+  `goconst` / `gocognit`.
+- Keep changes idiomatic: dependency injection via constructor parameters,
+  structured logging with zap, context propagation on all I/O.
+- Before pushing or opening a PR, verify Sonar new-code coverage ≥80%: run
+  `go test -race -coverprofile=coverage.out ./...` and confirm changed lines are
+  covered, including BOTH branches of any new conditional. `**/cmd/**`,
+  `**/db/migrations/**` and `**/core/repository/**` are coverage-excluded.
 
 ## Build, test, lint
 
+These are the commands CI runs, so a green local run means a green pipeline.
+
 ```bash
-GOTOOLCHAIN=auto go build ./... && go vet ./... && go test ./...   # unit
-go test -tags=integration ./internal/core/repository/...           # integration (needs Docker)
-golangci-lint run            # v2, .golangci.yml — MUST pass
+go build ./...
+go vet ./...
+go test -race ./...
+go test -tags=integration ./internal/core/repository/...   # needs Docker (testcontainers)
+golangci-lint run
 ```
 
-### Testing conventions
+Local development against an unreleased `pkg`: `pkg` is one module per package,
+so its root has no `go.mod` and a single `replace github.com/duynhlab/pkg` can no
+longer resolve. Use one commented `replace` line per module — the trailer in
+`go.mod` shows the shape, and
+[`docs/api/pkg.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/pkg.md)
+explains why.
 
-- **Unit tests** — stdlib `testing` only (no testify/gomock), hand-written mocks for
-  interfaces, table-driven subtests, in `*_test.go` next to the code: Web (`httptest`),
-  Logic (pure — mock the repo), gRPC (call handlers directly), `middleware`, `config`. Run
-  with `go test ./...` (no Docker).
-- **Integration tests** — `internal/core/repository` is tested against a **real Postgres**
-  via testcontainers, build-tagged `//go:build integration` (the default `go build`/`go test`
-  skip them, so the binary never links testcontainers). Run locally with Docker:
-  `go test -tags=integration ./internal/core/repository/...`. CI wires `integration: true`
-  (go-check) + `integration-coverage: true` (sonar), and merges both coverage profiles into
-  the ≥ 80% new-code gate.
-- **Before pushing**, both the unit run *and* the integration suite must be green locally —
-  green unit ≠ green CI (CI also runs integration with Docker).
+## Architecture boundaries
 
-Common lint fixes:
+**3-layer, dependencies flow one way only: transport → logic → core.**
 
-- `perfsprint` — use `errors.New()` over `fmt.Errorf()` when there are no format verbs.
-- `nosprintfhostport` — use `net.JoinHostPort()` over `fmt.Sprintf("%s:%s", host, port)`.
-- `errcheck` — check every error return (or explicit `_ = fn()`).
-- `goconst` / `gocognit` — extract repeated literals / split complex funcs.
-- `noctx` — use `http.NewRequestWithContext()`.
+- **Transport** — `internal/web/v1/` only. **This service is HTTP-only:** there
+  is no gRPC package, no gRPC dependency, and nothing to test as a gRPC handler.
+- **Logic** — `internal/logic/v1/` holds the credential rules, the refresh-token
+  family behaviour, and metrics.
+- **Core** — `internal/core/` owns the domain, the repositories, and the RS256
+  signer that mints tokens and serves the key set.
 
-## Conventions
+Observability is wired once through `github.com/duynhlab/pkg/obsx`; the pool comes
+from `github.com/duynhlab/pkg/dbx`; responses use the shared
+`github.com/duynhlab/pkg/httpx` envelope; logging is zap via
+`github.com/duynhlab/pkg/logger/zapx`.
 
-### 3-layer architecture (strict)
+## Invariants
 
-Dependency direction is **one-way**: `web → logic → core`. Never reverse.
+This service is the platform's root of trust. Each rule below exists because
+breaking it either lets someone in or locks everyone out.
 
-| Layer | Location | Allowed | Forbidden |
-|-------|----------|---------|-----------|
-| **Web** | `internal/web/v1/` | HTTP handling, JSON binding, DTO mapping, call Logic, aggregation | SQL, direct DB access, business rules |
-| **Logic** | `internal/logic/v1/` | Business rules, call repository interfaces, domain errors | SQL, `database.GetPool()`, `*gin.Context`, HTTP |
-| **Core** | `internal/core/` | Domain models, repository implementations, SQL, DB pool | HTTP, business orchestration |
+- **User enumeration is defended in constant time.** The not-found path still
+  runs a password comparison against a dummy hash, so login timing does not
+  reveal whether a username exists. That hash is built from fresh random bytes at
+  startup — no literal in the source for a scanner to flag, and no hash that
+  could correspond to a guessable password.
+- **Refresh tokens are hashed at rest.** Only the hash is stored, so a database
+  leak cannot yield usable tokens.
+- **Rotation is atomic: claim the presented token and insert its successor in the
+  same family, in one transaction.** A failed claim means the token was
+  concurrently rotated or replayed.
+- **A replayed token is theft, and the whole family is revoked.** A token whose
+  used marker is already set, or a lost claim race, both mean reuse.
+- **Expiry is not theft.** An expired token returns invalid and *returns before*
+  the reuse branch, so an ordinary expiry never revokes a family. Reordering
+  those checks would log people out for being slow.
+- **A failed revoke must be loud.** It records the span error and returns a 500
+  rather than a silent 401 — a quiet failure there leaves a compromised family
+  live. The reuse metric is counted *before* the revoke, because reuse was
+  detected regardless of whether the revoke then succeeded.
+- **Logout is idempotent and works with a dead access token.** An unknown or
+  already-revoked token is not an error, and the refresh token travels in the
+  body precisely so an expired access token can still revoke its family.
+- **A nil repository fails closed, never panics.** The repository is optional by
+  constructor contract, so a signer-but-no-repository deployment must degrade to
+  invalid rather than crash.
+- **Minting an access token is mandatory; issuing a refresh token is
+  best-effort.** Login and register must fail rather than return a response the
+  caller cannot authenticate with — but a refresh-issuance failure must not fail
+  the login.
+- **An ephemeral signing key is refused in production.** A per-pod key breaks
+  multi-replica verification, because each pod would serve a different key set,
+  and it invalidates every token on restart. The check runs before the
+  observability defers so it fails fast.
+- **The key id is derived from the key**, so it is stable for a given key and
+  verifiers can cache by it. The key set is served with a five-minute cache
+  header; a missing signer answers 404, not 500.
+- **Pooler-safe database settings live in `pkg/dbx`.** One DSN serves the app,
+  `migrate` and `seed`, so all three connect identically; pool sizing is applied
+  to the pool config, not the DSN.
+- **`seed` is development-only** and refuses production. It is invoked explicitly
+  — never from `migrate` or the serve path — and bypasses golang-migrate so it
+  does not share the `schema_migrations` version table.
+- **Graceful-shutdown ordering is load-bearing:** readiness 503 → drain delay →
+  HTTP shutdown → pool close → OTel last.
+- **The log tee mirrors the stdout level**, so debug lines never leave the pod on
+  an info-level service.
 
-- Web is the only transport; it delegates to Logic and returns domain data.
-- Use repository interfaces (defined in `core/domain/`) for data access. Constructor-injected dependencies only.
-- **Never** call Logic functions across services — use the HTTP transport. **Never** skip Logic (Web must not touch `core/repository` directly).
+## Repository map
 
-### JWT issuance (the only credential)
-
-- `internal/core/jwt` signs RS256 access tokens (claims `iss/aud/sub/exp/iat/nbf/jti/username/email`, `kid` header = SHA-256 of the public key) and serves the JWKS.
-- `JWT_PRIVATE_KEY_PEM` empty ⇒ ephemeral dev key; **production refuses to start** without a stable key (ephemeral keys break multi-replica verification).
-- Minting is **mandatory** — a mint failure fails login/register (there is no other credential).
-- Refresh tokens: opaque 32-byte, sha256-hashed at rest, family-tracked (`refresh_tokens`), rotated atomically on refresh; reuse/lost-race revokes the family. Logout revokes the family of the presented refresh token (idempotent).
-
-### Observability
-
-Backed by shared `github.com/duynhlab/pkg/obsx`.
-
-- `obsx.SetupMetrics()` runs in `main`; HTTP RED metrics surface on the single `/metrics` endpoint — **no separate metrics port**. Toggle via `METRICS_ENABLED`.
-- HTTP RED metrics come from `middleware/prometheus.go` (`request_duration_seconds`, `requests_in_flight`, `request_size_bytes`, `response_size_bytes`, with trace exemplars).
-- `obsx.TraceIDFromContext` gives the logging middleware its `trace_id` for log↔trace correlation (falls back to inbound `traceparent`/`X-Trace-ID`, then a generated ID).
-- **Middleware chain order**: `tracing → logging → metrics` (registered in `setupServer`).
-- Tracing: OTLP HTTP (`OTEL_COLLECTOR_ENDPOINT`, `OTEL_SAMPLE_RATE`, `TRACING_ENABLED`). Profiling: Pyroscope (`PYROSCOPE_ENDPOINT`, `PROFILING_ENABLED`).
-
-### Diagrams
-
-All diagrams **must** use Mermaid. Never ASCII art.
-
-```mermaid
-flowchart LR
-    Browser -->|HTTP :8080| Web[web/v1]
-    Service -. "JWKS fetch (cached)" .-> Web
-    Web --> Logic[logic/v1]
-    Logic --> Core[core]
-    Core -->|pgx| DB[(auth-db)]
-```
+- `cmd/main.go` — bootstrap, subcommand dispatch, routes, graceful shutdown
+- `config/config.go` — env config, validation, `BuildDSN()`
+- `internal/web/v1/handler.go` — the HTTP surface, including the deprecated aliases
+- `internal/logic/v1/` — credential and refresh-family rules, sentinel errors, metrics
+- `internal/core/jwt/signer.go` — RS256 minting and the key set
+- `internal/core/domain/`, `internal/core/repository/` — models and Postgres implementations
+- `db/migrations/`, `db/seed/` — embedded SQL; seed is development-only
+- `middleware/` — tracing and logging only
 
 ## Gotchas
 
-- **Graceful-shutdown order is fixed** (VictoriaMetrics pattern): `/ready` → 503 → drain delay (`READINESS_DRAIN_DELAY`, default 5s) → HTTP `Shutdown` → DB pool `Close` → tracer `Shutdown`. Don't reorder.
-- **Kyverno image rules**: deploy images must be `ghcr.io/duynhlab/auth-service/auth:<sha>` (or `:vX.Y.Z`). **Never `:latest`.**
-- Migrations run via the `migrate` subcommand (golang-migrate, embedded in the app binary; the init container reuses the app image), applying forward-only `.up.sql` files.
-- DB has a **dual connection pattern**: main container via PgBouncer (`auth-db-pooler:5432`), init/migration container direct (`auth-db:5432`) for DDL.
+- Kyverno admission rejects a workload image tagged `:latest` or unpinned. The
+  published image is `ghcr.io/duynhlab/auth-service/auth-service:<tag>` — the
+  repository path repeats, and the tag carries no `v` prefix. There is no
+  separate migration image; the init container reuses the app image with
+  `args: ["migrate"]`.
+- Metrics leave over OTLP. There is no `/metrics` endpoint and nothing scrapes
+  this service.
+- The canonical key-set path is `/auth/v1/public/auth/jwks`. The shorter
+  `/auth/v1/public/jwks` is a **deprecated alias** kept for one release — do not
+  make it the default anywhere, including in other services' configuration.
+- The minted token carries a `roles` claim that is **always an empty array**. It
+  is not documented as a platform claim and nothing consumes it; do not build
+  authorisation on it without deciding that deliberately.
 
-## API reference
+## API change synchronization
 
-Routes mount directly at `/{service}/v1/{audience}/…` (Variant A — one URL shape for browser and in-cluster callers). Kong is pure pass-through.
+An API change is not done when the code compiles.
 
-| Method | Path | Audience | Description |
-|--------|------|----------|-------------|
-| `POST` | `/auth/v1/public/auth/login` | public | Login → `{access_token, refresh_token, expires_in, user}` |
-| `POST` | `/auth/v1/public/auth/register` | public | Register → same response shape as login |
-| `POST` | `/auth/v1/public/auth/refresh` | public | Rotate the refresh token, mint a new pair; reuse revokes the family |
-| `POST` | `/auth/v1/public/auth/logout` | public | Body `{refresh_token}` — revoke the token family (idempotent) |
-| `GET` | `/auth/v1/public/auth/jwks` | public | JWKS for local verification (services + Kong edge) |
-
-Services verify JWTs locally via `pkg/authmw` (`MiddlewareJWT`) against this JWKS — no runtime call to auth-service on the hot path.
-
-Full convention + inventory: [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
+- The contract in homelab and this repository move **together** — same change,
+  and either the same PR pair or an immediate follow-up.
+- Behaviour that is designed but not deployed is marked **`Planned`** in the
+  contract; it is never described as current.
+- A material mismatch between the contract and this implementation **blocks the
+  release tag** until it is reconciled or explicitly accepted.
