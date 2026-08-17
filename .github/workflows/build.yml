@@ -41,7 +41,7 @@ jobs:
 
   docker-build:
     needs: [go-check, sonar]
-    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@6b1c155968c3212b10f0415a07e6e8e3cf04d5a9 # v1.0.1
+    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@725eb66998f03be252de9b11ef4bb530e59b9dd7 # v1.0.2
     with:
       image-name: ${{ github.event.repository.name }}
       push: true
